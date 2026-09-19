@@ -484,14 +484,21 @@ def _create_eye_with_namespace(
         background == "โปร่งใส"
         and native_rgba.getchannel("A").getextrema()[0] < 255
     )
+
+    # Always normalize *after* GPT has returned the original image.  The
+    # generator can place the circular iris slightly off-centre or leave an
+    # uneven amount of transparent canvas around it.  We therefore isolate the
+    # artwork first, then crop every generated eye to a centred square.  No
+    # stretching is performed: _crop_eye_clean() uses the larger detected axis
+    # as the square side and adds equal transparent padding around the result.
     if has_native_transparency:
-        # GPT already returned the final transparent 1:1 artwork. Keep it as-is;
-        # A4/4x6 layout code handles print sizing later.
-        image = native_rgba
+        isolated = native_rgba
     else:
-        image = _ensure_square(native_rgba, "โปร่งใส")
-        image = _remove_edge_background(image)
-        image = _crop_eye_clean(image)
+        isolated = _ensure_square(native_rgba, "โปร่งใส")
+        isolated = _remove_edge_background(isolated)
+
+    image = _crop_eye_clean(isolated)
+    image = _ensure_square(image, "โปร่งใส")
 
     path = path.with_suffix(".png")
     image.save(path, format="PNG")
