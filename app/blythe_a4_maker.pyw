@@ -6,6 +6,7 @@ import sys
 import json
 import os
 import random
+import tempfile
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -25,6 +26,7 @@ from blythe_ai import (
     create_eye_collection_16,
     design_collection_16,
 )
+from customer_portal import CustomerPortal
 
 
 DPI = 300
@@ -72,6 +74,28 @@ DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
+COVER_CANVAS_SIZE = 1000
+COVER_EYE_SIZE = 195
+COVER_TEMPLATE_SCLERA_SIZE = 224
+COVER_LEFT_EYE_POS = (198, 398)
+COVER_RIGHT_EYE_POS = (650, 398)
+
+
+def app_resource_path(*parts: str) -> Path:
+    candidates: list[Path] = []
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(sys._MEIPASS).joinpath(*parts))
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent.joinpath(*parts))
+    candidates.append(Path(__file__).resolve().parent.joinpath(*parts))
+    return next((path for path in candidates if path.exists()), candidates[-1])
+
+
+COVER_BASE_PATH = app_resource_path("cover_assets", "doll_cover_base.png")
+COVER_OVERLAY_PATH = app_resource_path("cover_assets", "doll_cover_overlay.png")
+COVER_TEMPLATES_DIR = app_resource_path("cover_assets", "templates_gpt_blank")
+COVER_TEMPLATES_MANIFEST = COVER_TEMPLATES_DIR / "manifest.json"
+
 VALID_EXTENSIONS = {".psd", ".png", ".jpg", ".jpeg", ".webp"}
 NUMBER_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
@@ -83,6 +107,41 @@ def design_key(group: int, design_id: str) -> str:
 
 def display_design_id(value: str) -> str:
     return value.split(":", 1)[1] if ":" in value else value
+
+
+def load_cover_templates() -> OrderedDict[str, dict[str, object]]:
+    templates: OrderedDict[str, dict[str, object]] = OrderedDict()
+    try:
+        data = json.loads(COVER_TEMPLATES_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return templates
+    if not isinstance(data, list):
+        return templates
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        template_id = str(item.get("id") or "").strip()
+        filename = str(item.get("file") or "").strip()
+        if not template_id or not filename:
+            continue
+        base_filename = str(item.get("base_file") or filename).strip()
+        path = COVER_TEMPLATES_DIR / base_filename
+        if not path.is_file():
+            continue
+        title = str(item.get("title") or f"Template {template_id}").strip()
+        left_center = item.get("left_center") or [300, 494]
+        right_center = item.get("right_center") or [748, 494]
+        templates[template_id] = {
+            "id": template_id,
+            "title": title,
+            "label": f"{template_id} • {title}",
+            "path": path,
+            "sclera_blank": bool(item.get("sclera_blank") or item.get("base_file")),
+            "left_center": tuple(int(value) for value in left_center[:2]),
+            "right_center": tuple(int(value) for value in right_center[:2]),
+            "eye_size": int(item.get("eye_size") or COVER_EYE_SIZE),
+        }
+    return templates
 
 
 def second_source_folder(first_source: Path) -> Path:
@@ -133,18 +192,6 @@ def discover_assets(folder: Path) -> OrderedDict[str, Path]:
     return OrderedDict(
         (key, found[key]) for key in sorted(found, key=natural_number_key)
     )
-
-
-def next_numeric_asset_id(folder: Path) -> str:
-    """Return the next whole-number source id, accounting for dotted ids too."""
-    highest = 0
-    for design_id in discover_assets(folder):
-        try:
-            highest = max(highest, int(design_id.split(".", 1)[0]))
-        except ValueError:
-            continue
-    return str(highest + 1)
-
 
 
 def four_sheet_sort_key(value: str) -> tuple[int, int, str]:
@@ -436,6 +483,117 @@ def make_round_ui_thumbnail(source: Image.Image, size_px: int) -> Image.Image:
     alpha = mask_large.resize((size_px, size_px), Image.Resampling.LANCZOS)
     resized.putalpha(alpha)
     return resized
+
+
+def _sample_template_sclera_color(
+    canvas: Image.Image,
+    center: tuple[int, int],
+    clear_size: int,
+) -> tuple[int, int, int]:
+    """Sample the existing eye white immediately beside an iris."""
+    cx, cy = center
+    radius = clear_size // 2
+    samples: list[tuple[int, int, int]] = []
+    for direction in (-1, 1):
+        sample_x = cx + direction * (radius + 8)
+        for y in range(cy - 10, cy + 11, 2):
+            for x in range(sample_x - 5, sample_x + 6, 2):
+                if not (0 <= x < canvas.width and 0 <= y < canvas.height):
+                    continue
+                r, g, b, _a = canvas.getpixel((x, y))
+                average = (r + g + b) / 3
+                # Keep only bright, low-saturation pixels so hair/skin/liner
+                # cannot tint the replacement sclera.
+                if average >= 180 and max(r, g, b) - min(r, g, b) <= 55:
+                    samples.append((r, g, b))
+    if not samples:
+        return (250, 248, 247)
+    middle = len(samples) // 2
+    median = tuple(
+        sorted(pixel[channel] for pixel in samples)[middle]
+        for channel in range(3)
+    )
+    # Keep a hint of the template's warm/cool sclera tone, but make the base
+    # unmistakably eye-white rather than carrying blush/iris color forward.
+    return tuple(round(value * 0.25 + 255 * 0.75) for value in median)
+
+
+def _blank_template_iris(
+    canvas: Image.Image,
+    center: tuple[int, int],
+    clear_size: int,
+) -> None:
+    """Replace a baked-in iris with natural sclera before inserting a new eye chip."""
+    color = _sample_template_sclera_color(canvas, center, clear_size)
+    scale = 4
+    mask_large = Image.new("L", (clear_size * scale, clear_size * scale), 0)
+    ImageDraw.Draw(mask_large).ellipse(
+        (0, 0, clear_size * scale - 1, clear_size * scale - 1),
+        fill=255,
+    )
+    mask = mask_large.resize((clear_size, clear_size), Image.Resampling.LANCZOS)
+    patch = Image.new("RGBA", (clear_size, clear_size), (*color, 255))
+    patch.putalpha(mask)
+    cx, cy = center
+    canvas.alpha_composite(
+        patch,
+        (round(cx - clear_size / 2), round(cy - clear_size / 2)),
+    )
+
+
+def render_doll_cover(
+    prepared_assets: OrderedDict[str, tuple[Path, ...]],
+    design_id: str,
+    template: dict[str, object] | None = None,
+    base_path: Path = COVER_BASE_PATH,
+    overlay_path: Path = COVER_OVERLAY_PATH,
+) -> Image.Image:
+    """Render one customer cover using the selected doll template and eye design."""
+    if template is not None:
+        template_path = Path(template["path"])
+        with Image.open(template_path) as opened:
+            canvas = opened.convert("RGBA").resize(
+                (COVER_CANVAS_SIZE, COVER_CANVAS_SIZE), Image.Resampling.LANCZOS
+            )
+        eye_size = int(template.get("eye_size") or COVER_EYE_SIZE)
+        chips = cached_design_chips(prepared_assets, design_id, eye_size)
+        left = make_round_ui_thumbnail(chips[0], eye_size)
+        right_source = chips[1] if len(chips) > 1 else chips[0]
+        right = make_round_ui_thumbnail(right_source, eye_size)
+        left_center = tuple(template.get("left_center") or (300, 494))
+        right_center = tuple(template.get("right_center") or (748, 494))
+        if not template.get("sclera_blank"):
+            clear_size = int(template.get("sclera_clear_size") or COVER_TEMPLATE_SCLERA_SIZE)
+            clear_size = max(clear_size, eye_size + 20)
+            # Backward-compatible fallback for old flattened templates.
+            _blank_template_iris(canvas, left_center, clear_size)
+            _blank_template_iris(canvas, right_center, clear_size)
+        radius = eye_size / 2
+        left_pos = (round(left_center[0] - radius), round(left_center[1] - radius))
+        right_pos = (round(right_center[0] - radius), round(right_center[1] - radius))
+        canvas.alpha_composite(left, left_pos)
+        canvas.alpha_composite(right, right_pos)
+        return canvas
+
+    if not base_path.exists() or not overlay_path.exists():
+        raise FileNotFoundError("ไม่พบไฟล์ต้นแบบรูปปก")
+
+    with Image.open(base_path) as opened:
+        canvas = opened.convert("RGBA")
+    with Image.open(overlay_path) as opened:
+        overlay = opened.convert("RGBA")
+
+    if canvas.size != (COVER_CANVAS_SIZE, COVER_CANVAS_SIZE) or overlay.size != canvas.size:
+        raise ValueError("ไฟล์ต้นแบบรูปปกต้องมีขนาด 1000×1000 px")
+
+    chips = cached_design_chips(prepared_assets, design_id, COVER_EYE_SIZE)
+    left = make_round_ui_thumbnail(chips[0], COVER_EYE_SIZE)
+    right_source = chips[1] if len(chips) > 1 else chips[0]
+    right = make_round_ui_thumbnail(right_source, COVER_EYE_SIZE)
+    canvas.alpha_composite(left, COVER_LEFT_EYE_POS)
+    canvas.alpha_composite(right, COVER_RIGHT_EYE_POS)
+    canvas.alpha_composite(overlay)
+    return canvas
 
 
 def diameter_to_pixels(diameter_mm: float) -> int:
@@ -879,6 +1037,20 @@ class BlytheA4App(tk.Tk):
         self.number_buttons: dict[str, tk.Button] = {}
         self.thumbnails: dict[str, ImageTk.PhotoImage] = {}
         self.preview_photo: ImageTk.PhotoImage | None = None
+        self.cover_selected_id: str | None = None
+        self.cover_number_buttons: dict[str, tk.Button] = {}
+        self.cover_preview_photo: ImageTk.PhotoImage | None = None
+        self.cover_templates = load_cover_templates()
+        self.cover_random_label = "★ สุ่มปก"
+        self.cover_template_labels = OrderedDict(
+            [(self.cover_random_label, "__random__")]
+            + [
+                (str(item["label"]), template_id)
+                for template_id, item in self.cover_templates.items()
+            ]
+        )
+        self.cover_random_template_id: str | None = None
+        self.cover_template_var = tk.StringVar(value=self.cover_random_label)
         self.six_sheets: OrderedDict[str, Path] = OrderedDict()
         self.six_pair_refs: OrderedDict[str, tuple[Path, int]] = OrderedDict()
         self.six_selections: OrderedDict[str, int] = OrderedDict()
@@ -893,8 +1065,12 @@ class BlytheA4App(tk.Tk):
         self.ai_collection_plan: dict | None = None
         self.ai_collection_state: dict[str, str] | None = None
         self.ai_collection_prompt = ""
+        self.portal_status_var = tk.StringVar(value="ปิดอยู่")
+        self.portal_url_var = tk.StringVar(value="ปิดอยู่ — ยังไม่มีลิงก์ใช้งาน")
+        self.customer_portal: CustomerPortal | None = None
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         source_a4_ok = Path(self.source_var.get()).is_dir()
         source_4x6_ok = Path(self.source_4x6_var.get()).is_dir()
         if source_a4_ok and source_4x6_ok:
@@ -1026,6 +1202,19 @@ class BlytheA4App(tk.Tk):
             highlightthickness=0,
         )
         self.ai_collection_nav_button.pack(side="left", padx=(4, 0))
+        self.cover_nav_button = tk.Button(
+            nav,
+            text="รูปปก",
+            command=lambda: self._show_page("cover"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self.cover_nav_button.pack(side="left", padx=(4, 0))
 
         self.page_host = ttk.Frame(outer)
         self.page_host.pack(fill="both", expand=True)
@@ -1033,10 +1222,12 @@ class BlytheA4App(tk.Tk):
         self.six_page = ttk.Frame(self.page_host)
         self.ai_single_page = ttk.Frame(self.page_host)
         self.ai_collection_page = ttk.Frame(self.page_host)
+        self.cover_page = ttk.Frame(self.page_host)
         self._build_a4_page(self.a4_page)
         self._build_4x6_page(self.six_page)
         self._build_ai_single_page(self.ai_single_page)
         self._build_ai_collection_page(self.ai_collection_page)
+        self._build_cover_page(self.cover_page)
         self.bind_all("<MouseWheel>", self._on_mousewheel)
         self._show_page("a4")
 
@@ -1160,6 +1351,74 @@ class BlytheA4App(tk.Tk):
             highlightthickness=0,
         ).pack(fill="x")
 
+    def _build_cover_page(self, parent: ttk.Frame) -> None:
+        body = ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
+
+        number_box = ttk.Frame(body)
+        number_box.pack(side="left", fill="both", expand=True)
+
+        chooser = ttk.Frame(number_box)
+        chooser.pack(fill="x", pady=(0, 6))
+        ttk.Label(
+            chooser,
+            text="แบบปก",
+            font=("Segoe UI", 9, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack(side="left")
+        self.cover_template_combo = ttk.Combobox(
+            chooser,
+            textvariable=self.cover_template_var,
+            values=list(self.cover_template_labels),
+            state="readonly",
+            width=30,
+        )
+        self.cover_template_combo.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self.cover_template_combo.bind("<<ComboboxSelected>>", self._on_cover_template_changed)
+        ttk.Button(chooser, text="สุ่มปก", command=self.randomize_cover_template).pack(side="left")
+
+        self.cover_number_canvas = tk.Canvas(number_box, highlightthickness=0, bg=UI_BG)
+        scrollbar = ttk.Scrollbar(number_box, orient="vertical", command=self.cover_number_canvas.yview)
+        self.cover_number_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.cover_number_canvas.pack(side="left", fill="both", expand=True)
+        self.cover_number_grid = ttk.Frame(self.cover_number_canvas)
+        self.cover_number_window = self.cover_number_canvas.create_window(
+            (0, 0), window=self.cover_number_grid, anchor="nw"
+        )
+        self.cover_number_grid.bind("<Configure>", self._update_cover_scrollregion)
+        self.cover_number_canvas.bind("<Configure>", self._resize_cover_number_grid)
+
+        preview = ttk.Frame(body, padding=(8, 0, 0, 0))
+        preview.pack(side="right", fill="y")
+        ttk.Label(
+            preview,
+            text="รูปปก  •  ตัวอย่างตา",
+            font=("Segoe UI", 10, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack()
+        self.cover_preview_label = ttk.Label(preview, anchor="center")
+        self.cover_preview_label.pack(pady=(6, 8))
+        ttk.Button(preview, text="โฟลเดอร์", command=self.open_cover_output_folder).pack(
+            fill="x", pady=(0, 8)
+        )
+        tk.Button(
+            preview,
+            text="บันทึกรูปตัวอย่าง",
+            command=self.generate_cover,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            padx=10,
+            pady=10,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+        ).pack(fill="x")
+
     def _build_ai_options(self, form: ttk.Frame) -> tk.Text:
         options = ttk.Frame(form)
         options.pack(fill="x", pady=(0, 10))
@@ -1235,7 +1494,7 @@ class BlytheA4App(tk.Tk):
         self.ai_single_prompt_text = self._build_ai_options(form)
         self.ai_generate_button = tk.Button(
             form,
-            text="สร้าง 1 คู่ • เพิ่มเข้า A4",
+            text="สร้าง 1 คู่",
             command=self.generate_ai_eye,
             bg=UI_ACCENT,
             fg="white",
@@ -1253,6 +1512,35 @@ class BlytheA4App(tk.Tk):
         ttk.Label(form, textvariable=self.ai_single_status_var, style="Muted.TLabel").pack(
             anchor="w", pady=(8, 0)
         )
+        self.ai_customer_link_button = tk.Button(
+            form,
+            text="OFF  ลิงก์ลูกค้า: ปิด",
+            command=self.toggle_customer_portal,
+            bg="#E8EFEB",
+            fg=UI_MUTED,
+            activebackground="#DCE9E1",
+            activeforeground=UI_TEXT,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            padx=10,
+            pady=8,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.ai_customer_link_button.pack(fill="x", pady=(10, 0))
+        portal_link_row = tk.Frame(form, bg=UI_BG)
+        portal_link_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(portal_link_row, text="ลิงก์").pack(side="left", padx=(0, 6))
+        self.portal_link_entry = ttk.Entry(portal_link_row, textvariable=self.portal_url_var, state="readonly")
+        self.portal_link_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(portal_link_row, text="คัดลอก", command=self._copy_customer_portal_link).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Label(form, textvariable=self.portal_status_var, style="Muted.TLabel").pack(
+            anchor="w", pady=(5, 0)
+        )
+        self._refresh_portal_controls()
         self._build_ai_preview(body, "single")
 
     def _build_ai_collection_page(self, parent: ttk.Frame) -> None:
@@ -1370,6 +1658,118 @@ class BlytheA4App(tk.Tk):
         folder.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(folder)])
 
+    def open_customer_portal(self) -> None:
+        if self.customer_portal is not None and self.customer_portal.is_running:
+            self._refresh_portal_controls()
+            return
+        try:
+            self.portal_status_var.set("กำลังเปิดลิงก์ชั่วคราว...")
+            self.customer_portal = CustomerPortal(
+                on_public_url=lambda url: self.after(0, self._customer_portal_url_ready, url),
+                on_generate_request=lambda job_id, payload: self.after(
+                    0, self._handle_portal_generate_request, job_id, payload
+                ),
+                save_root=self.customer_portal_output_dir(),
+            )
+            local_url = self.customer_portal.start()
+            self.portal_url_var.set(local_url)
+            self.portal_status_var.set("เปิดหน้าออกแบบแล้ว • กำลังขอลิงก์สาธารณะ...")
+            self._refresh_portal_controls()
+        except Exception as exc:
+            self.customer_portal = None
+            self.portal_status_var.set("เปิดลิงก์ไม่สำเร็จ")
+            self.portal_url_var.set("ปิดอยู่ — ยังไม่มีลิงก์ใช้งาน")
+            self._refresh_portal_controls()
+            messagebox.showerror("ลิงก์ลูกค้า", str(exc))
+
+    def customer_portal_output_dir(self) -> Path:
+        return Path(self.source_var.get()).parent / "ลูกค้าเลือกจากลิงก์"
+
+    def _handle_portal_generate_request(self, job_id: str, payload: dict[str, object]) -> None:
+        portal = self.customer_portal
+        if portal is None or not portal.is_running:
+            return
+        self.portal_status_var.set("ลูกค้าส่งคำสั่งแล้ว • โปรแกรมกำลังสร้างพรีวิว...")
+        self._set_ai_busy(True)
+        threading.Thread(
+            target=self._portal_generate_worker,
+            args=(portal, job_id, payload),
+            daemon=True,
+        ).start()
+
+    def _portal_generate_worker(
+        self,
+        portal: CustomerPortal,
+        job_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="blythe_customer_remote_") as temp_dir:
+                _path, image = create_eye(
+                    str(payload.get("notes") or ""),
+                    Path(temp_dir),
+                    style=str(payload.get("style") or "อัตโนมัติ"),
+                    background="โปร่งใส",
+                    design=str(payload.get("design") or "อัตโนมัติ"),
+                    color_primary=str(payload.get("primary") or "อัตโนมัติ"),
+                    color_secondary=str(payload.get("secondary") or "อัตโนมัติ"),
+                )
+            portal.complete_generation(job_id, image, dict(payload))
+            self.after(0, self.portal_status_var.set, "สร้างพรีวิวจากคำสั่งลูกค้าแล้ว")
+        except Exception:
+            portal.fail_generation(job_id)
+            self.after(0, self.portal_status_var.set, "โปรแกรมสร้างพรีวิวลูกค้าไม่สำเร็จ")
+        finally:
+            self.after(0, self._set_ai_busy, False)
+
+    def toggle_customer_portal(self) -> None:
+        if self.customer_portal is not None and self.customer_portal.is_running:
+            self.close_customer_portal()
+        else:
+            self.open_customer_portal()
+
+    def _refresh_portal_controls(self) -> None:
+        is_on = self.customer_portal is not None and self.customer_portal.is_running
+        if hasattr(self, "ai_customer_link_button"):
+            self.ai_customer_link_button.configure(
+                text=("ON   ลิงก์ลูกค้า: เปิดอยู่" if is_on else "OFF  ลิงก์ลูกค้า: ปิดอยู่"),
+                bg=(UI_ACCENT if is_on else "#E8EFEB"),
+                fg=("white" if is_on else UI_MUTED),
+                activebackground=(UI_ACCENT_DARK if is_on else "#DCE9E1"),
+                activeforeground="white" if is_on else UI_TEXT,
+            )
+
+    def _customer_portal_url_ready(self, url: str) -> None:
+        if self.customer_portal is None or not self.customer_portal.is_running:
+            return
+        self.portal_url_var.set(url)
+        self.portal_status_var.set("ลิงก์สาธารณะพร้อม • กดปิดลิงก์เมื่อเลิกใช้งาน")
+        self._refresh_portal_controls()
+
+    def _copy_customer_portal_link(self) -> None:
+        url = self.portal_url_var.get().strip()
+        if not url:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(url)
+        self.update()
+        self.portal_status_var.set("คัดลอกลิงก์แล้ว")
+
+    def close_customer_portal(self) -> None:
+        if self.customer_portal is not None:
+            self.customer_portal.stop()
+            self.customer_portal = None
+        self.portal_url_var.set("")
+        self.portal_url_var.set("ปิดอยู่ — ยังไม่มีลิงก์ใช้งาน")
+        self.portal_status_var.set("ปิดอยู่")
+        self._refresh_portal_controls()
+
+    def _on_close(self) -> None:
+        if self.customer_portal is not None:
+            self.customer_portal.stop()
+            self.customer_portal = None
+        self.destroy()
+
     def randomize_ai_options(self) -> None:
         styles = [value for value in STYLE_PROMPTS if value != "อัตโนมัติ"]
         designs = [value for value in DESIGN_PROMPTS if value != "อัตโนมัติ"]
@@ -1433,46 +1833,11 @@ class BlytheA4App(tk.Tk):
             return
         self.after(0, self._finish_ai_eye_success, path, image)
 
-    def _add_generated_eye_to_a4(self, image: Image.Image) -> str:
-        source_folder = Path(self.source_var.get())
-        if not source_folder.is_dir():
-            raise RuntimeError("Source A4 ไม่ถูกต้อง กรุณาตั้งค่าโฟลเดอร์ก่อน")
-        previous_a4 = list(self.selection_history)
-        previous_4x6 = list(self.six_selection_history)
-        design_id = next_numeric_asset_id(source_folder)
-        source_path = source_folder / f"{design_id}.png"
-        image.save(source_path, format="PNG", dpi=(DPI, DPI))
-        self.reload_assets()
-
-        for old_key in previous_a4:
-            if old_key in self.prepared_assets:
-                self.selections[old_key] = self.selections.get(old_key, 0) + 1
-                self.selection_history.append(old_key)
-        for old_key in previous_4x6:
-            if old_key in self.six_pair_refs:
-                self.six_selections[old_key] = self.six_selections.get(old_key, 0) + 1
-                self.six_selection_history.append(old_key)
-
-        key = design_key(1, design_id)
-        if key not in self.prepared_assets:
-            raise RuntimeError(f"เพิ่มหมายเลข {design_id} เข้า A4 ไม่สำเร็จ")
-        self.add_pair(key)
-        self.show_preview(key)
-        self.refresh_4x6_selection_status()
-        return design_id
-
     def _finish_ai_eye_success(self, path: Path, image: Image.Image) -> None:
         self.ai_image_path = path
         self.ai_image = image
         self._set_ai_preview(image, "single")
-        try:
-            design_id = self._add_generated_eye_to_a4(image)
-        except Exception as exc:
-            self.ai_single_status_var.set(f"สร้างรูปเสร็จ แต่เพิ่มเข้า A4 ไม่สำเร็จ: {path.name}")
-            self._set_ai_busy(False)
-            messagebox.showerror("AI 1 คู่", str(exc))
-            return
-        self.ai_single_status_var.set(f"พร้อมใช้ใน A4 • หมายเลข {design_id}")
+        self.ai_single_status_var.set(f"สร้างเสร็จ • เก็บไว้ใน AI_Eyes • {path.name}")
         self._set_ai_busy(False)
 
     def _finish_ai_eye_error(self, message: str) -> None:
@@ -1609,7 +1974,6 @@ class BlytheA4App(tk.Tk):
                 image_conversation_state,
                 self.ai_collection_prompt,
                 self.output_ai_dir(),
-                Path(self.source_4x6_var.get()),
             ),
             daemon=True,
         ).start()
@@ -1620,7 +1984,6 @@ class BlytheA4App(tk.Tk):
         conversation_state: dict[str, str],
         prompt: str,
         output_root: Path,
-        source_4x6: Path,
     ) -> None:
         def progress(message: str) -> None:
             self.after(0, self.ai_collection_status_var.set, message)
@@ -1642,7 +2005,7 @@ class BlytheA4App(tk.Tk):
             progress("กำลังจัดหน้า 4×6...")
             safe_name = sanitize_filename(str(plan.get("collection_name") or "AI_Preset")) or "AI_Preset"
             stamp = preset_dir.name.removeprefix("Preset_")
-            sheet_path = source_4x6 / f"AI_Preset_{safe_name}_{stamp}.png"
+            sheet_path = preset_dir / f"AI_Preset_{safe_name}_{stamp}_4x6.png"
             build_ai_preset_sheet(images, sheet_path)
         except Exception as exc:
             self.after(0, self._finish_ai_collection_error, str(exc))
@@ -1674,19 +2037,9 @@ class BlytheA4App(tk.Tk):
         self.ai_image = last_image
         self._set_ai_preview(last_image, "collection")
         self.ai_collection_status_var.set(f"ชุด 16 คู่พร้อม • {preset_dir.name}")
-        self._append_ai_log("จัดหน้า 4×6 เสร็จแล้ว")
-        self._append_ai_log(f"DONE • ชุด 16 คู่พร้อมใช้งาน • {preset_dir.name}")
+        self._append_ai_log("จัดหน้า 4×6 เสร็จแล้ว • เก็บไว้ใน AI_Eyes เท่านั้น")
+        self._append_ai_log(f"DONE • ชุด 16 คู่พร้อมให้เลือกภายหลัง • {preset_dir.name}")
         self._set_ai_busy(False)
-
-        self.reload_4x6_assets()
-        if sheet_path.stem in self.six_sheets:
-            self.six_sheet_var.set(sheet_path.stem)
-            self._populate_4x6_pair_grid()
-            keys = [four_pair_key(sheet_path.stem, index) for index in range(1, 17)]
-            self.six_selections = OrderedDict((key, 1) for key in keys)
-            self.six_selection_history = keys
-            self.refresh_4x6_selection_status()
-            self.show_4x6_preview()
 
     def _show_page(self, page: str) -> None:
         self.current_page = page
@@ -1694,6 +2047,7 @@ class BlytheA4App(tk.Tk):
         self.six_page.pack_forget()
         self.ai_single_page.pack_forget()
         self.ai_collection_page.pack_forget()
+        self.cover_page.pack_forget()
         active_bg = UI_ACCENT
         inactive_bg = UI_SURFACE
         if page == "ai_single":
@@ -1702,18 +2056,29 @@ class BlytheA4App(tk.Tk):
             self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.ai_single_nav_button.configure(bg=active_bg, fg="white")
             self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
         elif page == "ai_collection":
             self.ai_collection_page.pack(fill="both", expand=True)
             self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.ai_collection_nav_button.configure(bg=active_bg, fg="white")
+            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+        elif page == "cover":
+            self.cover_page.pack(fill="both", expand=True)
+            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.cover_nav_button.configure(bg=active_bg, fg="white")
+            self.show_cover_preview()
         elif page == "4x6":
             self.six_page.pack(fill="both", expand=True)
             self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.six_nav_button.configure(bg=active_bg, fg="white")
             self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.show_4x6_preview()
         else:
             self.a4_page.pack(fill="both", expand=True)
@@ -1721,11 +2086,14 @@ class BlytheA4App(tk.Tk):
             self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.show_preview()
 
     def _on_mousewheel(self, event) -> None:
         if self.current_page == "4x6":
             canvas = self.six_number_canvas
+        elif self.current_page == "cover":
+            canvas = self.cover_number_canvas
         elif self.current_page == "a4":
             canvas = self.number_canvas
         else:
@@ -1737,6 +2105,12 @@ class BlytheA4App(tk.Tk):
 
     def _resize_number_grid(self, event) -> None:
         self.number_canvas.itemconfigure(self.number_window, width=event.width)
+
+    def _update_cover_scrollregion(self, _event=None) -> None:
+        self.cover_number_canvas.configure(scrollregion=self.cover_number_canvas.bbox("all"))
+
+    def _resize_cover_number_grid(self, event) -> None:
+        self.cover_number_canvas.itemconfigure(self.cover_number_window, width=event.width)
 
     def _update_4x6_scrollregion(self, _event=None) -> None:
         self.six_number_canvas.configure(scrollregion=self.six_number_canvas.bbox("all"))
@@ -2002,6 +2376,8 @@ class BlytheA4App(tk.Tk):
         for col in range(columns):
             self.number_grid.columnconfigure(col, weight=1)
 
+        self._reload_cover_buttons(group_ids)
+
         reused = len(self.cache_stats.get("reused", []))
         rebuilt = len(self.cache_stats.get("rebuilt", []))
         failed = len(self.cache_stats.get("failed", {}))
@@ -2016,6 +2392,172 @@ class BlytheA4App(tk.Tk):
             messagebox.showwarning("ไม่พบลายตา", f"ไม่พบไฟล์ที่ชื่อเป็นหมายเลขใน\n{folder}")
 
         self.reload_4x6_assets()
+
+    def _reload_cover_buttons(self, group_ids: dict[int, list[str]]) -> None:
+        for child in self.cover_number_grid.winfo_children():
+            child.destroy()
+        self.cover_number_buttons.clear()
+
+        columns = 5
+
+        def add_button(design_id: str, row: int, col: int) -> None:
+            photo = self.thumbnails.get(design_id)
+            button = tk.Button(
+                self.cover_number_grid,
+                text=display_design_id(design_id),
+                image=photo,
+                compound="top",
+                width=72,
+                height=70,
+                padx=1,
+                pady=1,
+                font=("Segoe UI", 8, "bold"),
+                relief="flat",
+                bd=0,
+                bg=UI_SURFACE,
+                fg=UI_TEXT,
+                activebackground=UI_ACCENT_SOFT,
+                activeforeground=UI_ACCENT_DARK,
+                highlightthickness=1,
+                highlightbackground=UI_BORDER,
+                highlightcolor=UI_ACCENT,
+                cursor="hand2",
+                command=lambda value=design_id: self.select_cover_eye(value),
+            )
+            button.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
+            self.cover_number_buttons[design_id] = button
+
+        row_cursor = 0
+        for index, design_id in enumerate(group_ids[1]):
+            row_offset, col = divmod(index, columns)
+            add_button(design_id, row_cursor + row_offset, col)
+        if group_ids[1]:
+            row_cursor += (len(group_ids[1]) + columns - 1) // columns
+
+        if group_ids[2]:
+            ttk.Label(
+                self.cover_number_grid,
+                text="แบบที่สอง",
+                font=("Segoe UI", 11, "bold"),
+                foreground=UI_ACCENT_DARK,
+            ).grid(
+                row=row_cursor,
+                column=0,
+                columnspan=columns,
+                sticky="w",
+                padx=4,
+                pady=(12, 6),
+            )
+            row_cursor += 1
+            for index, design_id in enumerate(group_ids[2]):
+                row_offset, col = divmod(index, columns)
+                add_button(design_id, row_cursor + row_offset, col)
+
+        for col in range(columns):
+            self.cover_number_grid.columnconfigure(col, weight=1)
+
+        if self.cover_selected_id not in self.prepared_assets:
+            self.cover_selected_id = self.design_ids[0] if self.design_ids else None
+        self.refresh_cover_selection()
+        self.show_cover_preview()
+
+    def select_cover_eye(self, design_id: str) -> None:
+        self.cover_selected_id = design_id
+        if self.cover_template_var.get() == self.cover_random_label:
+            self._pick_random_cover_template()
+        self.refresh_cover_selection()
+        self.show_cover_preview()
+
+    def refresh_cover_selection(self) -> None:
+        for design_id, button in self.cover_number_buttons.items():
+            selected = design_id == self.cover_selected_id
+            button.configure(
+                bg=UI_ACCENT_SOFT if selected else UI_SURFACE,
+                fg=UI_ACCENT_DARK if selected else UI_TEXT,
+                highlightbackground=UI_ACCENT if selected else UI_BORDER,
+            )
+
+    def current_cover_template(self) -> dict[str, object] | None:
+        template_id = self.cover_template_labels.get(self.cover_template_var.get())
+        if template_id == "__random__":
+            if self.cover_random_template_id not in self.cover_templates:
+                self._pick_random_cover_template()
+            template_id = self.cover_random_template_id
+        return self.cover_templates.get(template_id) if template_id else None
+
+    def _on_cover_template_changed(self, _event=None) -> None:
+        if self.cover_template_var.get() == self.cover_random_label:
+            self._pick_random_cover_template()
+        self.show_cover_preview()
+
+    def _pick_random_cover_template(self) -> None:
+        template_ids = list(self.cover_templates)
+        if not template_ids:
+            self.cover_random_template_id = None
+            return
+        choices = [
+            template_id
+            for template_id in template_ids
+            if template_id != self.cover_random_template_id
+        ] or template_ids
+        self.cover_random_template_id = random.choice(choices)
+
+    def randomize_cover_template(self) -> None:
+        self.cover_template_var.set(self.cover_random_label)
+        self._pick_random_cover_template()
+        self.show_cover_preview()
+
+    def show_cover_preview(self) -> None:
+        if not self.cover_selected_id:
+            return
+        try:
+            page = render_doll_cover(
+                self.prepared_assets,
+                self.cover_selected_id,
+                template=self.current_cover_template(),
+            )
+            preview = ImageOps.contain(page, (330, 330), Image.Resampling.LANCZOS)
+            self.cover_preview_photo = ImageTk.PhotoImage(preview)
+            self.cover_preview_label.configure(image=self.cover_preview_photo)
+        except Exception:
+            pass
+
+    def cover_output_dir(self) -> Path:
+        return Path(self.source_var.get()).parent / "รูปปกลูกค้า"
+
+    def open_cover_output_folder(self) -> None:
+        folder = self.cover_output_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["explorer", str(folder)])
+
+    def generate_cover(self) -> None:
+        if not self.cover_selected_id:
+            messagebox.showwarning("ยังไม่ได้เลือก", "กรุณาเลือกหมายเลขตาก่อน")
+            return
+        try:
+            template = self.current_cover_template()
+            image = render_doll_cover(
+                self.prepared_assets,
+                self.cover_selected_id,
+                template=template,
+            )
+            folder = self.cover_output_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            customer = sanitize_filename(self.customer_var.get())
+            design_id = sanitize_filename(display_design_id(self.cover_selected_id))
+            template_id = sanitize_filename(str(template.get("id"))) if template else "original"
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prefix = (
+                f"cover_{customer}_t{template_id}_{design_id}"
+                if customer
+                else f"cover_t{template_id}_{design_id}"
+            )
+            output_path = folder / f"{prefix}_{stamp}.png"
+            image.save(output_path, format="PNG", dpi=(DPI, DPI))
+        except Exception as exc:
+            messagebox.showerror("บันทึกรูปไม่สำเร็จ", str(exc))
+            return
+        messagebox.showinfo("บันทึกแล้ว", str(output_path))
 
     def reload_4x6_assets(self) -> None:
         folder = Path(self.source_4x6_var.get())

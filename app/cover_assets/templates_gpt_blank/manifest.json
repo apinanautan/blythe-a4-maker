@@ -1,0 +1,342 @@
+[
+  {
+    "id": "01",
+    "title": "Porcelain Blonde Bob",
+    "group": "soft",
+    "file": "template_01.png",
+    "left_center": [
+      287,
+      502
+    ],
+    "right_center": [
+      748,
+      503
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "02",
+    "title": "Warm Tan Chestnut Bob",
+    "group": "soft",
+    "file": "template_02.png",
+    "left_center": [
+      288,
+      501
+    ],
+    "right_center": [
+      743,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "03",
+    "title": "Golden Tan Jet Black Long",
+    "group": "soft",
+    "file": "template_03.png",
+    "left_center": [
+      294,
+      503
+    ],
+    "right_center": [
+      747,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "04",
+    "title": "Neutral Beige Twin Ponytails",
+    "group": "soft",
+    "file": "template_04.png",
+    "left_center": [
+      285,
+      503
+    ],
+    "right_center": [
+      745,
+      503
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "05",
+    "title": "Deep Brown Natural Curls",
+    "group": "soft",
+    "file": "template_05.png",
+    "left_center": [
+      291,
+      502
+    ],
+    "right_center": [
+      748,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "06",
+    "title": "Rich Dark Burgundy Braids",
+    "group": "soft",
+    "file": "template_06.png",
+    "left_center": [
+      293,
+      504
+    ],
+    "right_center": [
+      742,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "07",
+    "title": "Peach Fair Copper Waves",
+    "group": "soft",
+    "file": "template_07.png",
+    "left_center": [
+      289,
+      502
+    ],
+    "right_center": [
+      753,
+      501
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "08",
+    "title": "Olive Ash Brown Layered Bob",
+    "group": "soft",
+    "file": "template_08.png",
+    "left_center": [
+      288,
+      502
+    ],
+    "right_center": [
+      743,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "09",
+    "title": "Light Neutral Pastel Pink Waves",
+    "group": "soft",
+    "file": "template_09.png",
+    "left_center": [
+      284,
+      502
+    ],
+    "right_center": [
+      745,
+      503
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "10",
+    "title": "Medium Deep Silver Pixie",
+    "group": "soft",
+    "file": "template_10.png",
+    "left_center": [
+      285,
+      498
+    ],
+    "right_center": [
+      741,
+      498
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "11",
+    "title": "Ice Gold Glam",
+    "group": "bold",
+    "file": "template_11.png",
+    "left_center": [
+      291,
+      503
+    ],
+    "right_center": [
+      752,
+      503
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "12",
+    "title": "Sun Bronze Honey",
+    "group": "bold",
+    "file": "template_12.png",
+    "left_center": [
+      296,
+      501
+    ],
+    "right_center": [
+      747,
+      501
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "13",
+    "title": "Olive Emerald Noir",
+    "group": "bold",
+    "file": "template_13.png",
+    "left_center": [
+      297,
+      503
+    ],
+    "right_center": [
+      746,
+      503
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "14",
+    "title": "Caramel Copper Fire",
+    "group": "bold",
+    "file": "template_14.png",
+    "left_center": [
+      292,
+      505
+    ],
+    "right_center": [
+      747,
+      504
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "15",
+    "title": "Deep Brown Silver Chic",
+    "group": "bold",
+    "file": "template_15.png",
+    "left_center": [
+      292,
+      507
+    ],
+    "right_center": [
+      749,
+      507
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "16",
+    "title": "Ebony Cobalt Royal",
+    "group": "bold",
+    "file": "template_16.png",
+    "left_center": [
+      296,
+      512
+    ],
+    "right_center": [
+      744,
+      511
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "17",
+    "title": "Cherry Graphic Pop",
+    "group": "bold",
+    "file": "template_17.png",
+    "left_center": [
+      295,
+      504
+    ],
+    "right_center": [
+      747,
+      504
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "18",
+    "title": "Freckled Strawberry Doll",
+    "group": "bold",
+    "file": "template_18.png",
+    "left_center": [
+      288,
+      503
+    ],
+    "right_center": [
+      745,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "19",
+    "title": "Violet Luxe",
+    "group": "bold",
+    "file": "template_19.png",
+    "left_center": [
+      292,
+      502
+    ],
+    "right_center": [
+      749,
+      502
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  },
+  {
+    "id": "20",
+    "title": "Teal Noir Contrast",
+    "group": "bold",
+    "file": "template_20.png",
+    "left_center": [
+      296,
+      505
+    ],
+    "right_center": [
+      748,
+      506
+    ],
+    "eye_size": 190,
+    "sclera_blank": true,
+    "source": "GPT edited: blank white sclera"
+  }
+]

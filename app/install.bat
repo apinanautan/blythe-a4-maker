@@ -58,7 +58,7 @@ if errorlevel 8 (
 )
 
 echo Installing Python package...
-python -m pip install -r "%APPDIR%\requirements.txt" --disable-pip-version-check
+python -m pip install -r "%APPDIR%\app\requirements.txt" --disable-pip-version-check
 if errorlevel 1 (
   echo Pillow installation failed.
   pause
@@ -68,7 +68,6 @@ if errorlevel 1 (
 echo.
 echo Installed: %APPDIR%
 echo Opening Blythe A4 Maker...
-start "" "%APPDIR%\run.bat"
+start "" pythonw "%APPDIR%\app\blythe_a4_maker.pyw"
 
 endlocal
-

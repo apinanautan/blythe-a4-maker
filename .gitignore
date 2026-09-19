@@ -2,7 +2,14 @@ __pycache__/
 *.pyc
 _test_output/
 _*.png
+_*.jpg
+_psd_layers/
+cover_assets_test/
 .venv/
 build/
 dist/
 *.spec
+
+app/_ของเก่า/
+app/cover_assets/candidates/
+app/cover_assets/templates/
