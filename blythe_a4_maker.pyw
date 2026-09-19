@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import json
+import os
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -31,9 +32,30 @@ CACHE_STATUS_NAME = "สถานะไฟล์.txt"
 
 DEFAULT_SOURCE = Path.home() / "Dropbox" / "พีซี" / "ตาน้องบลาย" / "ขายเเบบ1"
 DEFAULT_OUTPUT = DEFAULT_SOURCE.parent / "A4_ลูกค้า"
+SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
+SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
 VALID_EXTENSIONS = {".psd", ".png", ".jpg", ".jpeg", ".webp"}
 NUMBER_RE = re.compile(r"^\d+(?:\.\d+)?$")
+
+
+def load_user_settings() -> dict[str, str]:
+    try:
+        with SETTINGS_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return {str(key): str(value) for key, value in data.items()}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def save_user_settings(settings: dict[str, str]) -> None:
+    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    temp_file = SETTINGS_FILE.with_suffix(".tmp")
+    with temp_file.open("w", encoding="utf-8") as handle:
+        json.dump(settings, handle, ensure_ascii=False, indent=2)
+    temp_file.replace(SETTINGS_FILE)
 
 
 def natural_number_key(value: str) -> tuple[int, ...]:
@@ -432,8 +454,12 @@ class BlytheA4App(tk.Tk):
         self.geometry("760x560")
         self.minsize(680, 500)
 
-        self.source_var = tk.StringVar(value=str(DEFAULT_SOURCE))
-        self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
+        saved_settings = load_user_settings()
+        saved_source = saved_settings.get("source_folder", "").strip()
+        initial_source = Path(saved_source) if saved_source else DEFAULT_SOURCE
+
+        self.source_var = tk.StringVar(value=str(initial_source))
+        self.output_var = tk.StringVar(value=str(initial_source.parent / "A4_ลูกค้า"))
         self.customer_var = tk.StringVar()
         self.cache_var = tk.StringVar(value="กำลังตรวจไฟล์...")
 
@@ -464,6 +490,16 @@ class BlytheA4App(tk.Tk):
         ttk.Entry(info, textvariable=self.customer_var, width=18).pack(side="left", padx=(5, 10))
         ttk.Label(info, text="A4  •  14.5 mm", font=("Segoe UI", 9, "bold")).pack(side="left")
         ttk.Label(info, textvariable=self.cache_var, font=("Segoe UI", 8)).pack(side="left", padx=(10, 0))
+        tk.Button(
+            info,
+            text="⚙",
+            command=self.open_settings,
+            width=2,
+            relief="flat",
+            font=("Segoe UI Symbol", 11),
+            cursor="hand2",
+            bd=0,
+        ).pack(side="right")
 
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True, pady=(6, 0))
@@ -519,9 +555,80 @@ class BlytheA4App(tk.Tk):
         initial = current if current.exists() else Path.home()
         folder = filedialog.askdirectory(initialdir=str(initial), title="เลือกโฟลเดอร์ลายตา")
         if folder:
-            self.source_var.set(folder)
-            self.output_var.set(str(Path(folder).parent / "A4_ลูกค้า"))
-            self.reload_assets()
+            self.set_source_folder(Path(folder))
+
+    def set_source_folder(self, folder: Path, persist: bool = True) -> None:
+        folder = folder.expanduser().resolve()
+        if not folder.exists() or not folder.is_dir():
+            messagebox.showwarning("ไม่พบโฟลเดอร์", "กรุณาเลือกโฟลเดอร์ Source Data ที่มีอยู่จริง")
+            return
+
+        self.source_var.set(str(folder))
+        self.output_var.set(str(folder.parent / "A4_ลูกค้า"))
+        if persist:
+            try:
+                save_user_settings({"source_folder": str(folder)})
+            except OSError as exc:
+                messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc))
+        self.reload_assets()
+
+    def open_settings(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("ตั้งค่า")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Source Data", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Label(frame, text="โฟลเดอร์ที่เก็บไฟล์ลายตา").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 8)
+        )
+
+        source_setting_var = tk.StringVar(value=self.source_var.get())
+        entry = ttk.Entry(frame, textvariable=source_setting_var, width=54)
+        entry.grid(row=2, column=0, sticky="ew")
+
+        def browse() -> None:
+            current = Path(source_setting_var.get()) if source_setting_var.get() else Path.home()
+            initial = current if current.exists() else Path.home()
+            selected = filedialog.askdirectory(
+                parent=dialog,
+                initialdir=str(initial),
+                title="เลือกโฟลเดอร์ Source Data",
+            )
+            if selected:
+                source_setting_var.set(selected)
+
+        ttk.Button(frame, text="เลือก...", command=browse).grid(row=2, column=1, padx=(6, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
+
+        def save_and_close() -> None:
+            value = source_setting_var.get().strip()
+            if not value:
+                messagebox.showwarning("ยังไม่ได้เลือก", "กรุณาเลือกโฟลเดอร์ Source Data", parent=dialog)
+                return
+            folder = Path(value).expanduser()
+            if not folder.exists() or not folder.is_dir():
+                messagebox.showwarning("ไม่พบโฟลเดอร์", "โฟลเดอร์ที่เลือกไม่มีอยู่จริง", parent=dialog)
+                return
+            dialog.grab_release()
+            dialog.destroy()
+            self.set_source_folder(folder)
+
+        ttk.Button(buttons, text="บันทึก", command=save_and_close).pack(side="left")
+        frame.columnconfigure(0, weight=1)
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        entry.focus_set()
 
     def reload_assets(self) -> None:
         folder = Path(self.source_var.get())
