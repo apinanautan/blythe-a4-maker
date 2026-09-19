@@ -520,7 +520,10 @@ def create_eye_collection_16(
     for item in plan["pairs"]:
         index = int(item["index"])
         if progress:
-            progress(f"กำลังสร้าง {index}/16")
+            progress(
+                f"สร้างคู่ {index:02d}/16 • {item['primary']} + {item['secondary']}"
+                + (f" • {item.get('variation', '')}" if item.get("variation") else "")
+            )
         variation = str(item.get("variation") or "").strip()
         detail_parts = [
             (

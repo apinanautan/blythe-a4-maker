@@ -1244,7 +1244,7 @@ class BlytheA4App(tk.Tk):
 
         ttk.Label(
             form,
-            text="แผนชุด 16 คู่",
+            text="Process / แผนชุด 16 คู่",
             font=("Segoe UI", 9, "bold"),
             foreground=UI_ACCENT_DARK,
         ).pack(anchor="w", pady=(9, 4))
@@ -1265,7 +1265,7 @@ class BlytheA4App(tk.Tk):
 
         self.ai_generate_preset_button = tk.Button(
             form,
-            text="สร้างตามแผน 16 คู่",
+            text="ยืนยันแผนนี้ • เริ่มสร้าง 16 คู่",
             command=self.generate_ai_preset_from_plan,
             bg=UI_ACCENT,
             fg="white",
@@ -1404,6 +1404,15 @@ class BlytheA4App(tk.Tk):
         self.ai_collection_plan = None
         self.ai_collection_prompt = prompt
         self._show_ai_plan_text("")
+        self._append_ai_log("STEP 1 • รับค่าจากหน้า AI แล้ว")
+        self._append_ai_log(f"  สไตล์: {style}")
+        self._append_ai_log(f"  ลายม่านตา: {design}")
+        self._append_ai_log(f"  สีหลัก: {color_primary}  •  สีรอง: {color_secondary}")
+        if prompt:
+            self._append_ai_log(f"  รายละเอียดเพิ่ม: {prompt}")
+        self._append_ai_log("")
+        self._append_ai_log("STEP 2 • ส่งให้ GPT วางคอนเซ็ปต์ + palette + รายการ 1–16")
+        self._append_ai_log("  กำลังรอ GPT ตอบ... ยังไม่สร้างรูปภาพ")
         self._set_ai_busy(True)
         self.ai_status_var.set("กำลังวางแผนชุด 16 คู่...")
         threading.Thread(
@@ -1438,8 +1447,10 @@ class BlytheA4App(tk.Tk):
                 conversation_state=conversation_state,
             )
         except Exception as exc:
+            self.after(0, self._append_ai_log, f"ERROR • วางแผนไม่สำเร็จ: {exc}")
             self.after(0, self._finish_ai_eye_error, str(exc))
             return
+        self.after(0, self._append_ai_log, "STEP 3 • GPT ส่งแผนกลับมาแล้ว และผ่านการตรวจ 16 คู่")
         self.after(0, self._finish_ai_plan_success, plan, conversation_state, prompt)
 
     def _format_ai_plan(self, plan: dict) -> str:
@@ -1463,6 +1474,14 @@ class BlytheA4App(tk.Tk):
             self.ai_plan_text.insert("1.0", text)
         self.ai_plan_text.configure(state="disabled")
 
+    def _append_ai_log(self, text: str) -> None:
+        self.ai_plan_text.configure(state="normal")
+        if self.ai_plan_text.index("end-1c") != "1.0":
+            self.ai_plan_text.insert("end", "\n")
+        self.ai_plan_text.insert("end", text)
+        self.ai_plan_text.see("end")
+        self.ai_plan_text.configure(state="disabled")
+
     def _finish_ai_plan_success(
         self,
         plan: dict,
@@ -1472,14 +1491,23 @@ class BlytheA4App(tk.Tk):
         self.ai_collection_plan = plan
         self.ai_collection_state = conversation_state
         self.ai_collection_prompt = prompt
-        self._show_ai_plan_text(self._format_ai_plan(plan))
-        self.ai_status_var.set("แผนพร้อม • 16 คู่ • conversation เดียว")
+        self._append_ai_log("")
+        self._append_ai_log("========== แผนที่รอคุณ CONFIRM ==========")
+        self._append_ai_log(self._format_ai_plan(plan))
+        self._append_ai_log("")
+        self._append_ai_log("STEP 4 • ยังไม่สร้างรูป — อ่านแผนด้านบนก่อน")
+        self._append_ai_log("  ถ้าโอเค: กด “ยืนยันแผนนี้ • เริ่มสร้าง 16 คู่”")
+        self._append_ai_log("  ถ้าไม่โอเค: แก้ตัวเลือก/รายละเอียด แล้วกด “วางแผนใหม่ 16 คู่”")
+        self.ai_preset_button.configure(text="วางแผนใหม่ 16 คู่")
+        self.ai_status_var.set("รอคุณยืนยันแผน • ยังไม่สร้างรูป")
         self._set_ai_busy(False)
 
     def generate_ai_preset_from_plan(self) -> None:
         if self.ai_collection_plan is None or self.ai_collection_state is None:
             self.ai_status_var.set("กรุณาวางแผนชุดก่อน")
             return
+        self._append_ai_log("")
+        self._append_ai_log("CONFIRM • ผู้ใช้ยืนยันแผนแล้ว เริ่มสร้างตามรายการ 1–16")
         self._set_ai_busy(True)
         self.ai_status_var.set("กำลังสร้าง 1/16...")
         threading.Thread(
@@ -1504,6 +1532,7 @@ class BlytheA4App(tk.Tk):
     ) -> None:
         def progress(message: str) -> None:
             self.after(0, self.ai_status_var.set, message)
+            self.after(0, self._append_ai_log, message)
 
         def on_image(index: int, path: Path, image: Image.Image) -> None:
             preview = image.copy()
@@ -1540,6 +1569,7 @@ class BlytheA4App(tk.Tk):
         self.ai_image = image
         self._set_ai_preview(image)
         self.ai_status_var.set(f"กำลังสร้าง {index}/16 • conversation เดียว")
+        self._append_ai_log(f"  ✓ คู่ {index:02d}/16 เสร็จแล้ว • {path.name}")
 
     def _finish_ai_preset_success(
         self,
@@ -1552,6 +1582,8 @@ class BlytheA4App(tk.Tk):
         self.ai_image = last_image
         self._set_ai_preview(last_image)
         self.ai_status_var.set(f"ชุด 16 คู่พร้อม • {preset_dir.name}")
+        self._append_ai_log("จัดหน้า 4×6 เสร็จแล้ว")
+        self._append_ai_log(f"DONE • ชุด 16 คู่พร้อมใช้งาน • {preset_dir.name}")
         self._set_ai_busy(False)
 
         self.reload_4x6_assets()
