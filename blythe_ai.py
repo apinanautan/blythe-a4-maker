@@ -188,6 +188,11 @@ def _bridge_chat(
         # cursor is kept only in this running app process, so reopening the
         # program always starts a fresh ChatGPT history.
         "history_and_training_disabled": True,
+        # This request is planning/text only.  The bridge has an automatic
+        # image-intent interceptor for /v1/chat/completions; phrases such as
+        # "ห้ามสร้างรูปภาพตอนนี้" still contain image-generation keywords and
+        # can be misclassified.  Disable that interceptor explicitly here.
+        "chatgpt_image_intercept": False,
     }
     if conversation_state:
         conversation_id = conversation_state.get("conversation_id")
