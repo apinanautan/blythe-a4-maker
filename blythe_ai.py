@@ -431,15 +431,23 @@ def _create_eye_with_namespace(
     story = client_globals.get("_story_conversation")
     save_story = client_globals.get("_save_story_conversation")
     original_story = dict(story) if isinstance(story, dict) else None
-    use_story_history = bool(
-        conversation_state
-        and conversation_state.get("conversation_id")
-        and conversation_state.get("parent_message_id")
-        and isinstance(story, dict)
-    )
+    # A collection gets its own image-generation conversation.  An empty dict
+    # means "start a fresh image chat and capture its cursor"; a populated dict
+    # means "continue that same image chat".  Do not reuse the text-planning
+    # cursor here: ChatGPT Web can return 404 when an image request tries to
+    # continue a temporary text-only conversation.
+    use_story_history = conversation_state is not None and isinstance(story, dict)
     if use_story_history:
-        story["conversation_id"] = conversation_state["conversation_id"]
-        story["parent_message_id"] = conversation_state["parent_message_id"]
+        conversation_id = conversation_state.get("conversation_id")
+        parent_message_id = conversation_state.get("parent_message_id")
+        if conversation_id and parent_message_id:
+            story["conversation_id"] = conversation_id
+            story["parent_message_id"] = parent_message_id
+        else:
+            # Force the first eye of this collection to create a new image
+            # conversation instead of inheriting SnapGen's persisted story id.
+            story["conversation_id"] = None
+            story["parent_message_id"] = None
         if callable(save_story):
             client_globals["_save_story_conversation"] = lambda: None
     try:

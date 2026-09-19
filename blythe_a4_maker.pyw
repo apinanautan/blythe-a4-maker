@@ -1508,13 +1508,15 @@ class BlytheA4App(tk.Tk):
             return
         self._append_ai_log("")
         self._append_ai_log("CONFIRM • ผู้ใช้ยืนยันแผนแล้ว เริ่มสร้างตามรายการ 1–16")
+        self._append_ai_log("  เริ่มประวัติสร้างภาพใหม่สำหรับชุดนี้ • คู่ 01–16 จะอยู่ในประวัติภาพเดียวกัน")
+        image_conversation_state: dict[str, str] = {}
         self._set_ai_busy(True)
         self.ai_status_var.set("กำลังสร้าง 1/16...")
         threading.Thread(
             target=self._generate_ai_preset_worker,
             args=(
                 self.ai_collection_plan,
-                self.ai_collection_state,
+                image_conversation_state,
                 self.ai_collection_prompt,
                 self.output_ai_dir(),
                 Path(self.source_4x6_var.get()),
