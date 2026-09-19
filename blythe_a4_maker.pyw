@@ -5,6 +5,8 @@ import subprocess
 import sys
 import json
 import os
+import random
+import threading
 from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
@@ -13,7 +15,16 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageChops, ImageOps, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
+from blythe_ai import (
+    BACKGROUND_PROMPTS,
+    COLOR_PROMPTS,
+    DESIGN_PROMPTS,
+    STYLE_PROMPTS,
+    create_eye,
+    create_eye_collection_16,
+    design_collection_16,
+)
 
 
 DPI = 300
@@ -763,6 +774,45 @@ def build_4x6_pages(
 
     return outputs
 
+
+def build_ai_preset_sheet(images: list[Image.Image], output_path: Path) -> Path:
+    """Create one ready 4x6 source sheet: 16 pairs / 32 eyes at the real source size."""
+    if len(images) != 16:
+        raise ValueError("ชุด AI ต้องมี 16 คู่พอดี")
+
+    page = Image.new("RGB", (SIX_BY_FOUR_WIDTH, SIX_BY_FOUR_HEIGHT), "white")
+    for pair_index, source in enumerate(images):
+        rgba = source.convert("RGBA")
+        mask = rgba.getchannel("A").point(lambda value: 255 if value > 8 else 0)
+        bbox = mask.getbbox()
+        if bbox is None:
+            raise ValueError(f"คู่ {pair_index + 1} ไม่มีรูปตาที่ใช้งานได้")
+        eye = rgba.crop(bbox)
+        scale = SIX_BY_FOUR_EYE_PX / max(eye.width, eye.height)
+        eye = eye.resize(
+            (max(1, round(eye.width * scale)), max(1, round(eye.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        chip = Image.new("RGBA", (SIX_BY_FOUR_EYE_PX, SIX_BY_FOUR_EYE_PX), (255, 255, 255, 0))
+        chip.alpha_composite(
+            eye,
+            ((SIX_BY_FOUR_EYE_PX - eye.width) // 2, (SIX_BY_FOUR_EYE_PX - eye.height) // 2),
+        )
+        flat = Image.new("RGB", chip.size, "white")
+        flat.paste(chip, (0, 0), chip)
+
+        for slot_index in (pair_index * 2, pair_index * 2 + 1):
+            row, col = divmod(slot_index, SIX_BY_FOUR_COLUMNS)
+            center_x = SIX_BY_FOUR_SOURCE_X_CENTERS[col]
+            center_y = SIX_BY_FOUR_SOURCE_Y_CENTERS[row]
+            x = round(center_x - SIX_BY_FOUR_EYE_PX / 2)
+            y = round(center_y - SIX_BY_FOUR_EYE_PX / 2)
+            page.paste(flat, (x, y))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page.save(output_path, format="PNG", dpi=(DPI, DPI))
+    return output_path
+
 def selected_piece_count(selections: OrderedDict[str, int]) -> int:
     return sum(
         count * (1 if is_single_piece_id(display_design_id(design_id)) else 2)
@@ -800,6 +850,12 @@ class BlytheA4App(tk.Tk):
         self.cache_var = tk.StringVar(value="กำลังตรวจไฟล์...")
         self.six_status_var = tk.StringVar(value="0 / 16 คู่")
         self.six_sheet_var = tk.StringVar()
+        self.ai_status_var = tk.StringVar(value="พร้อมสร้าง")
+        self.ai_style_var = tk.StringVar(value="อัตโนมัติ")
+        self.ai_background_var = tk.StringVar(value="โปร่งใส")
+        self.ai_design_var = tk.StringVar(value="อัตโนมัติ")
+        self.ai_primary_color_var = tk.StringVar(value="อัตโนมัติ")
+        self.ai_secondary_color_var = tk.StringVar(value="อัตโนมัติ")
         self.current_page = "a4"
 
         self.assets: OrderedDict[str, Path] = OrderedDict()
@@ -818,6 +874,9 @@ class BlytheA4App(tk.Tk):
         self.six_number_buttons: dict[str, tk.Button] = {}
         self.six_thumbnails: dict[str, ImageTk.PhotoImage] = {}
         self.six_preview_photo: ImageTk.PhotoImage | None = None
+        self.ai_image: Image.Image | None = None
+        self.ai_image_path: Path | None = None
+        self.ai_preview_photo: ImageTk.PhotoImage | None = None
 
         self._build_ui()
         source_a4_ok = Path(self.source_var.get()).is_dir()
@@ -925,13 +984,28 @@ class BlytheA4App(tk.Tk):
             highlightthickness=0,
         )
         self.six_nav_button.pack(side="left", padx=(4, 0))
+        self.ai_nav_button = tk.Button(
+            nav,
+            text="AI สร้างตา",
+            command=lambda: self._show_page("ai"),
+            relief="flat",
+            bd=0,
+            padx=18,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self.ai_nav_button.pack(side="left", padx=(4, 0))
 
         self.page_host = ttk.Frame(outer)
         self.page_host.pack(fill="both", expand=True)
         self.a4_page = ttk.Frame(self.page_host)
         self.six_page = ttk.Frame(self.page_host)
+        self.ai_page = ttk.Frame(self.page_host)
         self._build_a4_page(self.a4_page)
         self._build_4x6_page(self.six_page)
+        self._build_ai_page(self.ai_page)
         self.bind_all("<MouseWheel>", self._on_mousewheel)
         self._show_page("a4")
 
@@ -1055,21 +1129,341 @@ class BlytheA4App(tk.Tk):
             highlightthickness=0,
         ).pack(fill="x")
 
+    def _build_ai_page(self, parent: ttk.Frame) -> None:
+        body = ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=0)
+        body.rowconfigure(0, weight=1)
+
+        form = ttk.Frame(body)
+        form.grid(row=0, column=0, sticky="nsew", padx=(4, 16))
+
+        options = ttk.Frame(form)
+        options.pack(fill="x", pady=(0, 10))
+        ttk.Label(options, text="สไตล์ภาพ", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.ai_style_combo = ttk.Combobox(
+            options,
+            textvariable=self.ai_style_var,
+            values=list(STYLE_PROMPTS),
+            state="readonly",
+            width=22,
+        )
+        self.ai_style_combo.pack(side="left", padx=(6, 14))
+        ttk.Label(options, text="พื้นหลังโปร่งใส", style="Muted.TLabel").pack(side="left")
+
+        design_row = ttk.Frame(form)
+        design_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(design_row, text="ลายม่านตา", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.ai_design_combo = ttk.Combobox(
+            design_row,
+            textvariable=self.ai_design_var,
+            values=list(DESIGN_PROMPTS),
+            state="readonly",
+            width=24,
+        )
+        self.ai_design_combo.pack(side="left", padx=(6, 14))
+        ttk.Button(design_row, text="สุ่มทั้งหมด", command=self.randomize_ai_options).pack(side="left")
+
+        color_row = ttk.Frame(form)
+        color_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(color_row, text="สีหลัก", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.ai_primary_color_combo = ttk.Combobox(
+            color_row,
+            textvariable=self.ai_primary_color_var,
+            values=list(COLOR_PROMPTS),
+            state="readonly",
+            width=11,
+        )
+        self.ai_primary_color_combo.pack(side="left", padx=(6, 14))
+        ttk.Label(color_row, text="สีรอง", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.ai_secondary_color_combo = ttk.Combobox(
+            color_row,
+            textvariable=self.ai_secondary_color_var,
+            values=list(COLOR_PROMPTS),
+            state="readonly",
+            width=11,
+        )
+        self.ai_secondary_color_combo.pack(side="left", padx=(6, 0))
+
+        ttk.Label(
+            form,
+            text="รายละเอียดเพิ่ม (ไม่ใส่ก็ได้)",
+            font=("Segoe UI", 10, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack(anchor="w")
+        self.ai_prompt_text = tk.Text(
+            form,
+            height=5,
+            wrap="word",
+            bg=UI_SURFACE,
+            fg=UI_TEXT,
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 10),
+        )
+        self.ai_prompt_text.pack(fill="x", pady=(6, 10))
+
+        self.ai_generate_button = tk.Button(
+            form,
+            text="สร้างรูปตา",
+            command=self.generate_ai_eye,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            padx=10,
+            pady=9,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.ai_generate_button.pack(fill="x")
+        self.ai_preset_button = tk.Button(
+            form,
+            text="ออกแบบชุด 16 คู่ • 4×6",
+            command=self.generate_ai_preset,
+            bg=UI_ACCENT_DARK,
+            fg="white",
+            activebackground=UI_ACCENT,
+            activeforeground="white",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            padx=10,
+            pady=9,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.ai_preset_button.pack(fill="x", pady=(6, 0))
+        ttk.Label(form, textvariable=self.ai_status_var, style="Muted.TLabel").pack(
+            anchor="w", pady=(8, 0)
+        )
+
+        preview = ttk.Frame(body)
+        preview.grid(row=0, column=1, sticky="n", padx=(0, 4))
+        ttk.Label(
+            preview,
+            text="AI Preview",
+            font=("Segoe UI", 10, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack()
+        self.ai_preview_label = tk.Label(
+            preview,
+            bg="white",
+            bd=1,
+            relief="solid",
+            highlightthickness=0,
+        )
+        self.ai_preview_label.pack(pady=(6, 8))
+        self._set_ai_preview(Image.new("RGBA", (240, 240), (255, 255, 255, 0)))
+        ttk.Button(preview, text="เปิดโฟลเดอร์", command=self.open_ai_output_folder).pack(fill="x")
+
+    def _set_ai_preview(self, image: Image.Image) -> None:
+        preview = ImageOps.contain(image.convert("RGBA"), (216, 216), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (240, 240), (238, 238, 238, 255))
+        draw = ImageDraw.Draw(canvas)
+        tile = 16
+        for y in range(0, 240, tile):
+            for x in range(0, 240, tile):
+                if (x // tile + y // tile) % 2:
+                    draw.rectangle((x, y, x + tile - 1, y + tile - 1), fill=(255, 255, 255, 255))
+        canvas.alpha_composite(preview, ((240 - preview.width) // 2, (240 - preview.height) // 2))
+        self.ai_preview_photo = ImageTk.PhotoImage(canvas)
+        self.ai_preview_label.configure(image=self.ai_preview_photo)
+
+    def output_ai_dir(self) -> Path:
+        return Path(self.source_var.get()).parent / "AI_Eyes"
+
+    def open_ai_output_folder(self) -> None:
+        folder = self.output_ai_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["explorer", str(folder)])
+
+    def randomize_ai_options(self) -> None:
+        styles = [value for value in STYLE_PROMPTS if value != "อัตโนมัติ"]
+        designs = [value for value in DESIGN_PROMPTS if value != "อัตโนมัติ"]
+        colors = [value for value in COLOR_PROMPTS if value != "อัตโนมัติ"]
+        self.ai_style_var.set(random.choice(styles))
+        self.ai_design_var.set(random.choice(designs))
+        primary, secondary = random.sample(colors, 2)
+        self.ai_primary_color_var.set(primary)
+        self.ai_secondary_color_var.set(secondary)
+        self.ai_status_var.set("สุ่มตัวเลือกแล้ว")
+
+    def _set_ai_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        self.ai_generate_button.configure(state=state)
+        self.ai_preset_button.configure(state=state)
+
+    def generate_ai_eye(self) -> None:
+        prompt = self.ai_prompt_text.get("1.0", "end").strip()
+        style = self.ai_style_var.get()
+        background = self.ai_background_var.get()
+        design = self.ai_design_var.get()
+        color_primary = self.ai_primary_color_var.get()
+        color_secondary = self.ai_secondary_color_var.get()
+        self._set_ai_busy(True)
+        self.ai_status_var.set("กำลังสร้างรูป...")
+        threading.Thread(
+            target=self._generate_ai_eye_worker,
+            args=(prompt, style, background, design, color_primary, color_secondary),
+            daemon=True,
+        ).start()
+
+    def _generate_ai_eye_worker(
+        self,
+        prompt: str,
+        style: str,
+        background: str,
+        design: str,
+        color_primary: str,
+        color_secondary: str,
+    ) -> None:
+        try:
+            path, image = create_eye(
+                prompt,
+                self.output_ai_dir(),
+                style=style,
+                background=background,
+                design=design,
+                color_primary=color_primary,
+                color_secondary=color_secondary,
+            )
+        except Exception as exc:
+            self.after(0, self._finish_ai_eye_error, str(exc))
+            return
+        self.after(0, self._finish_ai_eye_success, path, image)
+
+    def _finish_ai_eye_success(self, path: Path, image: Image.Image) -> None:
+        self.ai_image_path = path
+        self.ai_image = image
+        self._set_ai_preview(image)
+        self.ai_status_var.set(f"สร้างเสร็จ: {path.name}")
+        self._set_ai_busy(False)
+
+    def _finish_ai_eye_error(self, message: str) -> None:
+        self.ai_status_var.set("สร้างรูปไม่สำเร็จ")
+        self._set_ai_busy(False)
+        messagebox.showerror("AI สร้างตา", message)
+
+    def generate_ai_preset(self) -> None:
+        prompt = self.ai_prompt_text.get("1.0", "end").strip()
+        style = self.ai_style_var.get()
+        design = self.ai_design_var.get()
+        color_primary = self.ai_primary_color_var.get()
+        color_secondary = self.ai_secondary_color_var.get()
+        output_root = self.output_ai_dir()
+        source_4x6 = Path(self.source_4x6_var.get())
+        self._set_ai_busy(True)
+        self.ai_status_var.set("กำลังออกแบบชุด...")
+        threading.Thread(
+            target=self._generate_ai_preset_worker,
+            args=(
+                prompt,
+                style,
+                design,
+                color_primary,
+                color_secondary,
+                output_root,
+                source_4x6,
+            ),
+            daemon=True,
+        ).start()
+
+    def _generate_ai_preset_worker(
+        self,
+        prompt: str,
+        style: str,
+        design: str,
+        color_primary: str,
+        color_secondary: str,
+        output_root: Path,
+        source_4x6: Path,
+    ) -> None:
+        def progress(message: str) -> None:
+            self.after(0, self.ai_status_var.set, message)
+
+        try:
+            plan = design_collection_16(
+                prompt,
+                style=style,
+                design=design,
+                color_primary=color_primary,
+                color_secondary=color_secondary,
+            )
+            preset_dir, paths, images = create_eye_collection_16(
+                plan,
+                prompt,
+                output_root,
+                progress=progress,
+            )
+            progress("กำลังจัดหน้า 4×6...")
+            safe_name = sanitize_filename(str(plan.get("collection_name") or "AI_Preset")) or "AI_Preset"
+            stamp = preset_dir.name.removeprefix("Preset_")
+            sheet_path = source_4x6 / f"AI_Preset_{safe_name}_{stamp}.png"
+            build_ai_preset_sheet(images, sheet_path)
+        except Exception as exc:
+            self.after(0, self._finish_ai_eye_error, str(exc))
+            return
+        self.after(
+            0,
+            self._finish_ai_preset_success,
+            sheet_path,
+            preset_dir,
+            paths[-1],
+            images[-1],
+        )
+
+    def _finish_ai_preset_success(
+        self,
+        sheet_path: Path,
+        preset_dir: Path,
+        last_path: Path,
+        last_image: Image.Image,
+    ) -> None:
+        self.ai_image_path = last_path
+        self.ai_image = last_image
+        self._set_ai_preview(last_image)
+        self.ai_status_var.set(f"ชุด 16 คู่พร้อม • {preset_dir.name}")
+        self._set_ai_busy(False)
+
+        self.reload_4x6_assets()
+        if sheet_path.stem in self.six_sheets:
+            self.six_sheet_var.set(sheet_path.stem)
+            self._populate_4x6_pair_grid()
+            keys = [four_pair_key(sheet_path.stem, index) for index in range(1, 17)]
+            self.six_selections = OrderedDict((key, 1) for key in keys)
+            self.six_selection_history = keys
+            self.refresh_4x6_selection_status()
+            self.show_4x6_preview()
+        self._show_page("4x6")
+
     def _show_page(self, page: str) -> None:
         self.current_page = page
         self.a4_page.pack_forget()
         self.six_page.pack_forget()
+        self.ai_page.pack_forget()
         active_bg = UI_ACCENT
         inactive_bg = UI_SURFACE
-        if page == "4x6":
+        if page == "ai":
+            self.ai_page.pack(fill="both", expand=True)
+            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.ai_nav_button.configure(bg=active_bg, fg="white")
+        elif page == "4x6":
             self.six_page.pack(fill="both", expand=True)
             self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.six_nav_button.configure(bg=active_bg, fg="white")
+            self.ai_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.show_4x6_preview()
         else:
             self.a4_page.pack(fill="both", expand=True)
             self.a4_nav_button.configure(bg=active_bg, fg="white")
             self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.ai_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
             self.show_preview()
 
     def _on_mousewheel(self, event) -> None:
