@@ -427,6 +427,7 @@ def _create_eye_with_namespace(
         raise RuntimeError("SnapGen client has no generate_image()")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    pngs_before = {path.resolve() for path in output_dir.glob("*.png")}
     client_globals = getattr(generate_image, "__globals__", namespace)
     story = client_globals.get("_story_conversation")
     save_story = client_globals.get("_save_story_conversation")
@@ -477,18 +478,33 @@ def _create_eye_with_namespace(
                 client_globals["_save_story_conversation"] = save_story
     path = Path(result)
     with Image.open(path) as opened:
-        if background == "โปร่งใส" and "A" in opened.mode:
-            image = opened.convert("RGBA").copy()
-        else:
-            image = opened.convert("RGB").copy()
+        native_rgba = opened.convert("RGBA").copy()
 
-    image = _ensure_square(image, "โปร่งใส")
-    if image.mode != "RGBA" or image.getchannel("A").getextrema() == (255, 255):
+    has_native_transparency = (
+        background == "โปร่งใส"
+        and native_rgba.getchannel("A").getextrema()[0] < 255
+    )
+    if has_native_transparency:
+        # GPT already returned the final transparent 1:1 artwork. Keep it as-is;
+        # A4/4x6 layout code handles print sizing later.
+        image = native_rgba
+    else:
+        image = _ensure_square(native_rgba, "โปร่งใส")
         image = _remove_edge_background(image)
-    image = _crop_eye_clean(image)
+        image = _crop_eye_clean(image)
 
     path = path.with_suffix(".png")
     image.save(path, format="PNG")
+
+    # Some ChatGPT Web image responses expose more than one fresh image asset
+    # even though n=1. SnapGen/Blythe uses only the returned path, so remove
+    # only the extra PNGs created during this request. Existing user files are
+    # never touched.
+    keep = path.resolve()
+    for extra in output_dir.glob("*.png"):
+        resolved = extra.resolve()
+        if resolved not in pngs_before and resolved != keep:
+            extra.unlink(missing_ok=True)
     return path, image
 
 
@@ -510,6 +526,7 @@ def create_eye(
         design,
         color_primary,
         color_secondary,
+        save_sidecar=False,
     )
 
 
