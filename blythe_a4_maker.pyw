@@ -30,6 +30,16 @@ CACHE_DIR_NAME = "_prepared_14.5mm"
 CACHE_MANIFEST_NAME = "prepared_manifest.json"
 CACHE_STATUS_NAME = "สถานะไฟล์.txt"
 
+# Modern white/green UI palette.
+UI_BG = "#F5FAF7"
+UI_SURFACE = "#FFFFFF"
+UI_ACCENT = "#2BA66A"
+UI_ACCENT_DARK = "#1E7E4E"
+UI_ACCENT_SOFT = "#E4F6EC"
+UI_TEXT = "#173D2B"
+UI_MUTED = "#6B8477"
+UI_BORDER = "#D6E9DE"
+
 DEFAULT_SOURCE = Path.home() / "Dropbox" / "พีซี" / "ตาน้องบลาย" / "ขายเเบบ1"
 DEFAULT_OUTPUT = DEFAULT_SOURCE.parent / "A4_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
@@ -179,6 +189,24 @@ def make_chip(source: Image.Image, size_px: int) -> Image.Image:
     chip = Image.new("RGB", (size_px, size_px), "white")
     chip.paste(fitted, (0, 0), mask)
     return chip
+
+
+def make_round_ui_thumbnail(source: Image.Image, size_px: int) -> Image.Image:
+    """Create a transparent circular thumbnail for the GUI only."""
+    resized = source.convert("RGBA").resize((size_px, size_px), Image.Resampling.LANCZOS)
+
+    # Draw the alpha mask at higher resolution so the circular edge stays smooth.
+    scale = 4
+    mask_large = Image.new("L", (size_px * scale, size_px * scale), 0)
+    from PIL import ImageDraw
+
+    ImageDraw.Draw(mask_large).ellipse(
+        (0, 0, size_px * scale - 1, size_px * scale - 1),
+        fill=255,
+    )
+    alpha = mask_large.resize((size_px, size_px), Image.Resampling.LANCZOS)
+    resized.putalpha(alpha)
+    return resized
 
 
 def diameter_to_pixels(diameter_mm: float) -> int:
@@ -453,6 +481,8 @@ class BlytheA4App(tk.Tk):
         self.title("Blythe Eye A4 Maker")
         self.geometry("760x560")
         self.minsize(680, 500)
+        self.configure(bg=UI_BG)
+        self._configure_theme()
 
         saved_settings = load_user_settings()
         saved_source = saved_settings.get("source_folder", "").strip()
@@ -480,16 +510,65 @@ class BlytheA4App(tk.Tk):
             self.cache_var.set("เลือกโฟลเดอร์ลายตาครั้งแรก")
             self.after(150, self.choose_source)
 
+    def _configure_theme(self) -> None:
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure("TFrame", background=UI_BG)
+        style.configure("TLabel", background=UI_BG, foreground=UI_TEXT, font=("Segoe UI", 9))
+        style.configure("Muted.TLabel", background=UI_BG, foreground=UI_MUTED, font=("Segoe UI", 8))
+        style.configure(
+            "TEntry",
+            fieldbackground=UI_SURFACE,
+            foreground=UI_TEXT,
+            insertcolor=UI_TEXT,
+            bordercolor=UI_BORDER,
+            lightcolor=UI_BORDER,
+            darkcolor=UI_BORDER,
+            padding=5,
+        )
+        style.configure(
+            "TButton",
+            background=UI_SURFACE,
+            foreground=UI_TEXT,
+            bordercolor=UI_BORDER,
+            lightcolor=UI_BORDER,
+            darkcolor=UI_BORDER,
+            relief="flat",
+            padding=(8, 5),
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "TButton",
+            background=[("pressed", UI_ACCENT_SOFT), ("active", UI_ACCENT_SOFT)],
+            foreground=[("pressed", UI_ACCENT_DARK), ("active", UI_ACCENT_DARK)],
+        )
+        style.configure(
+            "Vertical.TScrollbar",
+            background=UI_ACCENT_SOFT,
+            troughcolor=UI_BG,
+            bordercolor=UI_BG,
+            arrowcolor=UI_ACCENT_DARK,
+        )
+
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=8)
         outer.pack(fill="both", expand=True)
 
         info = ttk.Frame(outer)
         info.pack(fill="x")
-        ttk.Label(info, text="ลูกค้า").pack(side="left")
+        ttk.Label(info, text="ลูกค้า", font=("Segoe UI", 9, "bold")).pack(side="left")
         ttk.Entry(info, textvariable=self.customer_var, width=18).pack(side="left", padx=(5, 10))
-        ttk.Label(info, text="A4  •  14.5 mm", font=("Segoe UI", 9, "bold")).pack(side="left")
-        ttk.Label(info, textvariable=self.cache_var, font=("Segoe UI", 8)).pack(side="left", padx=(10, 0))
+        ttk.Label(
+            info,
+            text="A4  •  14.5 mm",
+            font=("Segoe UI", 9, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack(side="left")
+        ttk.Label(info, textvariable=self.cache_var, style="Muted.TLabel").pack(side="left", padx=(10, 0))
         tk.Button(
             info,
             text="⚙",
@@ -499,6 +578,11 @@ class BlytheA4App(tk.Tk):
             font=("Segoe UI Symbol", 11),
             cursor="hand2",
             bd=0,
+            bg=UI_BG,
+            fg=UI_ACCENT_DARK,
+            activebackground=UI_ACCENT_SOFT,
+            activeforeground=UI_ACCENT_DARK,
+            highlightthickness=0,
         ).pack(side="right")
 
         body = ttk.Frame(outer)
@@ -507,7 +591,7 @@ class BlytheA4App(tk.Tk):
         number_box = ttk.Frame(body)
         number_box.pack(side="left", fill="both", expand=True)
 
-        self.number_canvas = tk.Canvas(number_box, highlightthickness=0)
+        self.number_canvas = tk.Canvas(number_box, highlightthickness=0, bg=UI_BG)
         scrollbar = ttk.Scrollbar(number_box, orient="vertical", command=self.number_canvas.yview)
         self.number_canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
@@ -523,7 +607,12 @@ class BlytheA4App(tk.Tk):
 
         preview = ttk.Frame(body, padding=(8, 0, 0, 0))
         preview.pack(side="right", fill="y")
-        ttk.Label(preview, text="ตัวอย่าง", font=("Segoe UI", 10, "bold")).pack()
+        ttk.Label(
+            preview,
+            text="ตัวอย่าง",
+            font=("Segoe UI", 10, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack()
         self.preview_label = ttk.Label(preview, anchor="center")
         self.preview_label.pack(pady=(6, 8))
         ttk.Button(preview, text="ลบล่าสุด", command=self.undo_last_selection).pack(fill="x", pady=(0, 4))
@@ -533,9 +622,9 @@ class BlytheA4App(tk.Tk):
             preview,
             text="สร้าง A4",
             command=self.generate,
-            bg="#2e9d52",
+            bg=UI_ACCENT,
             fg="white",
-            activebackground="#248243",
+            activebackground=UI_ACCENT_DARK,
             activeforeground="white",
             font=("Segoe UI", 12, "bold"),
             relief="flat",
@@ -578,6 +667,7 @@ class BlytheA4App(tk.Tk):
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
+        dialog.configure(bg=UI_BG)
 
         frame = ttk.Frame(dialog, padding=14)
         frame.pack(fill="both", expand=True)
@@ -656,9 +746,9 @@ class BlytheA4App(tk.Tk):
                     design_id,
                     diameter_to_pixels(DEFAULT_DIAMETER_MM),
                 )[0]
-                preview = preview_source.resize((46, 46), Image.Resampling.LANCZOS)
+                preview = make_round_ui_thumbnail(preview_source, 46)
             except Exception:
-                preview = Image.new("RGB", (46, 46), "#eeeeee")
+                preview = Image.new("RGBA", (46, 46), (0, 0, 0, 0))
 
             photo = ImageTk.PhotoImage(preview)
             self.thumbnails[design_id] = photo
@@ -672,7 +762,16 @@ class BlytheA4App(tk.Tk):
                 padx=1,
                 pady=1,
                 font=("Segoe UI", 8, "bold"),
-                relief="raised",
+                relief="flat",
+                bd=0,
+                bg=UI_SURFACE,
+                fg=UI_TEXT,
+                activebackground=UI_ACCENT_SOFT,
+                activeforeground=UI_ACCENT_DARK,
+                highlightthickness=1,
+                highlightbackground=UI_BORDER,
+                highlightcolor=UI_ACCENT,
+                cursor="hand2",
                 command=lambda value=design_id: self.select_and_add(value),
             )
             button.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
@@ -758,8 +857,10 @@ class BlytheA4App(tk.Tk):
             count = self.selections.get(design_id, 0)
             button.configure(
                 text=f"{design_id}   ×{count}" if count else design_id,
-                relief="sunken" if count else "raised",
-                bg="#d9f2e6" if count else "SystemButtonFace",
+                relief="flat",
+                bg=UI_ACCENT_SOFT if count else UI_SURFACE,
+                fg=UI_ACCENT_DARK if count else UI_TEXT,
+                highlightbackground=UI_ACCENT if count else UI_BORDER,
             )
 
 
