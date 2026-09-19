@@ -176,12 +176,27 @@ def _response_text(result: dict) -> str:
     return str(result.get("text") or "").strip()
 
 
-def _bridge_chat(namespace: dict, prompt: str) -> str:
+def _bridge_chat(
+    namespace: dict,
+    prompt: str,
+    conversation_state: dict[str, str] | None = None,
+) -> tuple[str, dict[str, str]]:
     payload = {
         "model": namespace.get("MODEL") or "auto",
         "messages": [{"role": "user", "content": prompt}],
+        # Keep the Blythe collection conversation temporary.  The returned
+        # cursor is kept only in this running app process, so reopening the
+        # program always starts a fresh ChatGPT history.
         "history_and_training_disabled": True,
     }
+    if conversation_state:
+        conversation_id = conversation_state.get("conversation_id")
+        parent_message_id = conversation_state.get("parent_message_id")
+        if conversation_id and parent_message_id:
+            payload["metadata"] = {
+                "conversation_id": conversation_id,
+                "parent_message_id": parent_message_id,
+            }
     request = urllib.request.Request(
         f"{str(namespace.get('BRIDGE_URL') or 'http://127.0.0.1:8000').rstrip('/')}/v1/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -204,7 +219,13 @@ def _bridge_chat(namespace: dict, prompt: str) -> str:
     text = _response_text(result)
     if not text:
         raise RuntimeError("GPT ไม่ส่งแผนชุดตากลับมา")
-    return text
+    state = {
+        "conversation_id": str(result.get("conversation_id") or ""),
+        "parent_message_id": str(result.get("parent_message_id") or ""),
+    }
+    if not state["conversation_id"] or not state["parent_message_id"]:
+        raise RuntimeError("Bridge ไม่ส่งรหัส conversation สำหรับชุด 16 คู่")
+    return text, state
 
 
 def _json_object(text: str) -> dict:
@@ -256,9 +277,15 @@ def _validate_collection_plan(plan: dict, requested_style: str, requested_design
             "variation": str(item.get("variation") or "").strip()[:240],
         }
 
+    concept = str(plan.get("concept") or "").strip()[:500]
+    direction = str(plan.get("direction") or "").strip()[:500]
+    if not concept or not direction:
+        raise ValueError("แผนต้องมีคอนเซ็ปต์และแนวทางรวมของทั้งชุด")
     name = str(plan.get("collection_name") or "").strip()[:80] or f"{style} {design}"
     return {
         "collection_name": name,
+        "concept": concept,
+        "direction": direction,
         "style": style,
         "design": design,
         "pairs": [normalized[index] for index in range(1, 17)],
@@ -271,12 +298,14 @@ def design_collection_16(
     design: str = "อัตโนมัติ",
     color_primary: str = "อัตโนมัติ",
     color_secondary: str = "อัตโนมัติ",
-) -> dict:
+    conversation_state: dict[str, str] | None = None,
+) -> tuple[dict, dict[str, str]]:
     styles = ", ".join(value for value in STYLE_PROMPTS if value != "อัตโนมัติ")
     designs = ", ".join(value for value in DESIGN_PROMPTS if value != "อัตโนมัติ")
     colors = ", ".join(value for value in COLOR_PROMPTS if value not in {"อัตโนมัติ", "พาสเทลสุ่ม"})
     prompt = f"""คุณเป็นนักออกแบบคอลเลกชันตาตุ๊กตา Blythe สำหรับขายเป็นพรีเซ็ต 4x6 นิ้ว
-ออกแบบคอลเลกชันเดียวกันจำนวน 16 คู่ ให้ทั้งชุดดูกลมกลืนและขายเป็นชุดเดียวได้ แต่แต่ละคู่มีสีหรือ variation ต่างกันพอดี ไม่สุ่มคนละธีม
+นี่เป็นขั้นวางแผนเท่านั้น ห้ามสร้างรูปภาพตอนนี้
+วางคอนเซ็ปต์รวมหนึ่งชุด แล้วออกแบบแนวทางของตา 16 คู่ภายใต้คอนเซ็ปต์เดียวกัน ให้ทั้งชุดดูกลมกลืนและขายเป็นพรีเซ็ตเดียวได้ แต่แต่ละคู่มีสีหรือ variation ต่างกันอย่างมีเหตุผล ไม่สุ่มคนละธีม
 
 ค่าที่ผู้ใช้เลือก:
 - สไตล์: {style}
@@ -292,21 +321,24 @@ def design_collection_16(
 - primary และ secondary ของแต่ละคู่ต้องเลือกจากรายชื่อนี้เท่านั้น: {colors}
 - ถ้าผู้ใช้เลือกสีไว้ ให้ใช้สีนั้นเป็นแกนของ palette แต่ยังออกแบบ 16 คู่ให้มีความหลากหลายได้
 - variation เป็นคำอธิบายสั้น ๆ ไม่เกินหนึ่งประโยค เพื่อปรับน้ำหนักสี ความหม่น ความสว่าง halo หรือ texture โดยยังไม่หลุดธีม
+- concept อธิบายแก่นของคอลเลกชันนี้ว่าเป็นงานแนวไหน อารมณ์อะไร และภาพรวมควรให้ความรู้สึกแบบใด
+- direction อธิบายภาษาภาพรวมของทั้งชุด เช่น palette, contrast, halo, texture และจังหวะความหลากหลายของ 16 คู่
 - ตอบ JSON เท่านั้น ห้าม Markdown ห้ามคำอธิบายนอก JSON
 
 รูปแบบที่ต้องส่งกลับ:
-{{"collection_name":"ชื่อชุดสั้น ๆ","style":"ชื่อสไตล์","design":"ชื่อลาย","pairs":[{{"index":1,"primary":"ชื่อสี","secondary":"ชื่อสี","variation":"รายละเอียดสั้น ๆ"}}]}}
+{{"collection_name":"ชื่อชุดสั้น ๆ","concept":"คอนเซ็ปต์รวม","direction":"แนวทางภาพรวมของทั้งชุด","style":"ชื่อสไตล์","design":"ชื่อลาย","pairs":[{{"index":1,"primary":"ชื่อสี","secondary":"ชื่อสี","variation":"รายละเอียดสั้น ๆ"}}]}}
 ต้องมี pairs ตั้งแต่ index 1 ถึง 16 ครบพอดี"""
 
     namespace = _snapgen_namespace()
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            text = _bridge_chat(
+            text, conversation_state = _bridge_chat(
                 namespace,
                 prompt if attempt == 0 else prompt + "\nครั้งก่อน JSON ไม่ผ่าน validation กรุณาส่งใหม่ให้ตรง schema ทุกข้อ",
+                conversation_state,
             )
-            return _validate_collection_plan(_json_object(text), style, design)
+            return _validate_collection_plan(_json_object(text), style, design), conversation_state
         except (ValueError, json.JSONDecodeError) as exc:
             last_error = exc
     raise RuntimeError(f"GPT ส่งแผนชุดตาไม่ถูกต้อง: {last_error}")
@@ -383,26 +415,53 @@ def _create_eye_with_namespace(
     color_secondary: str = "ทอง",
     name_hint: str = "blythe_ai_eye",
     save_sidecar: bool = True,
+    conversation_state: dict[str, str] | None = None,
 ) -> tuple[Path, Image.Image]:
     generate_image = namespace.get("generate_image")
     if not callable(generate_image):
         raise RuntimeError("SnapGen client has no generate_image()")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    result = generate_image(
-        eye_prompt(
-            user_prompt,
-            style,
-            background,
-            design,
-            color_primary,
-            color_secondary,
-        ),
-        output_dir=str(output_dir),
-        name_hint=name_hint,
-        aspect_ratio="1:1",
-        save_sidecar=save_sidecar,
+    client_globals = getattr(generate_image, "__globals__", namespace)
+    story = client_globals.get("_story_conversation")
+    save_story = client_globals.get("_save_story_conversation")
+    original_story = dict(story) if isinstance(story, dict) else None
+    use_story_history = bool(
+        conversation_state
+        and conversation_state.get("conversation_id")
+        and conversation_state.get("parent_message_id")
+        and isinstance(story, dict)
     )
+    if use_story_history:
+        story["conversation_id"] = conversation_state["conversation_id"]
+        story["parent_message_id"] = conversation_state["parent_message_id"]
+        if callable(save_story):
+            client_globals["_save_story_conversation"] = lambda: None
+    try:
+        result = generate_image(
+            eye_prompt(
+                user_prompt,
+                style,
+                background,
+                design,
+                color_primary,
+                color_secondary,
+            ),
+            output_dir=str(output_dir),
+            name_hint=name_hint,
+            aspect_ratio="1:1",
+            save_sidecar=save_sidecar,
+            use_story_history=use_story_history,
+        )
+        if use_story_history:
+            conversation_state["conversation_id"] = str(story.get("conversation_id") or "")
+            conversation_state["parent_message_id"] = str(story.get("parent_message_id") or "")
+    finally:
+        if use_story_history and original_story is not None:
+            story.clear()
+            story.update(original_story)
+            if callable(save_story):
+                client_globals["_save_story_conversation"] = save_story
     path = Path(result)
     with Image.open(path) as opened:
         if background == "โปร่งใส" and "A" in opened.mode:
@@ -445,7 +504,9 @@ def create_eye_collection_16(
     plan: dict,
     user_prompt: str,
     output_root: Path,
+    conversation_state: dict[str, str],
     progress=None,
+    on_image=None,
 ) -> tuple[Path, list[Path], list[Image.Image]]:
     if len(plan.get("pairs") or []) != 16:
         raise ValueError("แผนชุดตาต้องมี 16 คู่")
@@ -461,7 +522,18 @@ def create_eye_collection_16(
         if progress:
             progress(f"กำลังสร้าง {index}/16")
         variation = str(item.get("variation") or "").strip()
-        detail_parts = [part for part in (user_prompt.strip(), variation) if part]
+        detail_parts = [
+            (
+                f"This is pair {index} of the 16-pair Blythe collection plan already defined earlier "
+                "in this same conversation. Preserve the collection concept, visual language, palette logic, "
+                "and overall theme consistently."
+            ),
+            f"Collection concept: {plan.get('concept', '')}",
+            f"Overall direction: {plan.get('direction', '')}",
+            user_prompt.strip(),
+            f"Pair {index} direction: {variation}" if variation else "",
+        ]
+        detail_parts = [part for part in detail_parts if part and not part.endswith(": ")]
         detail = ". ".join(detail_parts)
         last_error: Exception | None = None
         for _attempt in range(2):
@@ -477,6 +549,7 @@ def create_eye_collection_16(
                     color_secondary=item["secondary"],
                     name_hint=f"preset_{index:02d}",
                     save_sidecar=False,
+                    conversation_state=conversation_state,
                 )
                 canonical = preset_dir / f"{index:02d}.png"
                 image.save(canonical, format="PNG")
@@ -484,6 +557,8 @@ def create_eye_collection_16(
                     path.unlink(missing_ok=True)
                 paths.append(canonical)
                 images.append(image)
+                if on_image:
+                    on_image(index, canonical, image)
                 break
             except Exception as exc:
                 last_error = exc

@@ -877,6 +877,9 @@ class BlytheA4App(tk.Tk):
         self.ai_image: Image.Image | None = None
         self.ai_image_path: Path | None = None
         self.ai_preview_photo: ImageTk.PhotoImage | None = None
+        self.ai_collection_plan: dict | None = None
+        self.ai_collection_state: dict[str, str] | None = None
+        self.ai_collection_prompt = ""
 
         self._build_ui()
         source_a4_ok = Path(self.source_var.get()).is_dir()
@@ -1194,7 +1197,7 @@ class BlytheA4App(tk.Tk):
         ).pack(anchor="w")
         self.ai_prompt_text = tk.Text(
             form,
-            height=5,
+            height=3,
             wrap="word",
             bg=UI_SURFACE,
             fg=UI_TEXT,
@@ -1223,7 +1226,7 @@ class BlytheA4App(tk.Tk):
         self.ai_generate_button.pack(fill="x")
         self.ai_preset_button = tk.Button(
             form,
-            text="ออกแบบชุด 16 คู่ • 4×6",
+            text="วางแผนชุด 16 คู่",
             command=self.generate_ai_preset,
             bg=UI_ACCENT_DARK,
             fg="white",
@@ -1238,6 +1241,46 @@ class BlytheA4App(tk.Tk):
             highlightthickness=0,
         )
         self.ai_preset_button.pack(fill="x", pady=(6, 0))
+
+        ttk.Label(
+            form,
+            text="แผนชุด 16 คู่",
+            font=("Segoe UI", 9, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack(anchor="w", pady=(9, 4))
+        self.ai_plan_text = tk.Text(
+            form,
+            height=9,
+            wrap="word",
+            bg=UI_SURFACE,
+            fg=UI_TEXT,
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 9),
+            padx=7,
+            pady=6,
+            state="disabled",
+        )
+        self.ai_plan_text.pack(fill="both", expand=True)
+
+        self.ai_generate_preset_button = tk.Button(
+            form,
+            text="สร้างตามแผน 16 คู่",
+            command=self.generate_ai_preset_from_plan,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            padx=10,
+            pady=9,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+            state="disabled",
+        )
+        self.ai_generate_preset_button.pack(fill="x", pady=(6, 0))
         ttk.Label(form, textvariable=self.ai_status_var, style="Muted.TLabel").pack(
             anchor="w", pady=(8, 0)
         )
@@ -1297,6 +1340,9 @@ class BlytheA4App(tk.Tk):
         state = "disabled" if busy else "normal"
         self.ai_generate_button.configure(state=state)
         self.ai_preset_button.configure(state=state)
+        self.ai_generate_preset_button.configure(
+            state=("disabled" if busy or self.ai_collection_plan is None else "normal")
+        )
 
     def generate_ai_eye(self) -> None:
         prompt = self.ai_prompt_text.get("1.0", "end").strip()
@@ -1355,50 +1401,122 @@ class BlytheA4App(tk.Tk):
         design = self.ai_design_var.get()
         color_primary = self.ai_primary_color_var.get()
         color_secondary = self.ai_secondary_color_var.get()
-        output_root = self.output_ai_dir()
-        source_4x6 = Path(self.source_4x6_var.get())
+        self.ai_collection_plan = None
+        self.ai_collection_prompt = prompt
+        self._show_ai_plan_text("")
         self._set_ai_busy(True)
-        self.ai_status_var.set("กำลังออกแบบชุด...")
+        self.ai_status_var.set("กำลังวางแผนชุด 16 คู่...")
         threading.Thread(
-            target=self._generate_ai_preset_worker,
+            target=self._plan_ai_preset_worker,
             args=(
                 prompt,
                 style,
                 design,
                 color_primary,
                 color_secondary,
-                output_root,
-                source_4x6,
+                self.ai_collection_state,
             ),
             daemon=True,
         ).start()
 
-    def _generate_ai_preset_worker(
+    def _plan_ai_preset_worker(
         self,
         prompt: str,
         style: str,
         design: str,
         color_primary: str,
         color_secondary: str,
+        conversation_state: dict[str, str] | None,
+    ) -> None:
+        try:
+            plan, conversation_state = design_collection_16(
+                prompt,
+                style=style,
+                design=design,
+                color_primary=color_primary,
+                color_secondary=color_secondary,
+                conversation_state=conversation_state,
+            )
+        except Exception as exc:
+            self.after(0, self._finish_ai_eye_error, str(exc))
+            return
+        self.after(0, self._finish_ai_plan_success, plan, conversation_state, prompt)
+
+    def _format_ai_plan(self, plan: dict) -> str:
+        lines = [
+            f"ชื่อชุด: {plan.get('collection_name', '')}",
+            f"คอนเซ็ปต์: {plan.get('concept', '')}",
+            f"แนวทาง: {plan.get('direction', '')}",
+            f"สไตล์: {plan.get('style', '')}  •  ลาย: {plan.get('design', '')}",
+            "",
+        ]
+        for item in plan.get("pairs", []):
+            lines.append(
+                f"{int(item['index']):02d}. {item['primary']} + {item['secondary']} — {item.get('variation', '')}"
+            )
+        return "\n".join(lines)
+
+    def _show_ai_plan_text(self, text: str) -> None:
+        self.ai_plan_text.configure(state="normal")
+        self.ai_plan_text.delete("1.0", "end")
+        if text:
+            self.ai_plan_text.insert("1.0", text)
+        self.ai_plan_text.configure(state="disabled")
+
+    def _finish_ai_plan_success(
+        self,
+        plan: dict,
+        conversation_state: dict[str, str],
+        prompt: str,
+    ) -> None:
+        self.ai_collection_plan = plan
+        self.ai_collection_state = conversation_state
+        self.ai_collection_prompt = prompt
+        self._show_ai_plan_text(self._format_ai_plan(plan))
+        self.ai_status_var.set("แผนพร้อม • 16 คู่ • conversation เดียว")
+        self._set_ai_busy(False)
+
+    def generate_ai_preset_from_plan(self) -> None:
+        if self.ai_collection_plan is None or self.ai_collection_state is None:
+            self.ai_status_var.set("กรุณาวางแผนชุดก่อน")
+            return
+        self._set_ai_busy(True)
+        self.ai_status_var.set("กำลังสร้าง 1/16...")
+        threading.Thread(
+            target=self._generate_ai_preset_worker,
+            args=(
+                self.ai_collection_plan,
+                self.ai_collection_state,
+                self.ai_collection_prompt,
+                self.output_ai_dir(),
+                Path(self.source_4x6_var.get()),
+            ),
+            daemon=True,
+        ).start()
+
+    def _generate_ai_preset_worker(
+        self,
+        plan: dict,
+        conversation_state: dict[str, str],
+        prompt: str,
         output_root: Path,
         source_4x6: Path,
     ) -> None:
         def progress(message: str) -> None:
             self.after(0, self.ai_status_var.set, message)
 
+        def on_image(index: int, path: Path, image: Image.Image) -> None:
+            preview = image.copy()
+            self.after(0, self._show_ai_generation_progress, index, path, preview)
+
         try:
-            plan = design_collection_16(
-                prompt,
-                style=style,
-                design=design,
-                color_primary=color_primary,
-                color_secondary=color_secondary,
-            )
             preset_dir, paths, images = create_eye_collection_16(
                 plan,
                 prompt,
                 output_root,
+                conversation_state,
                 progress=progress,
+                on_image=on_image,
             )
             progress("กำลังจัดหน้า 4×6...")
             safe_name = sanitize_filename(str(plan.get("collection_name") or "AI_Preset")) or "AI_Preset"
@@ -1416,6 +1534,12 @@ class BlytheA4App(tk.Tk):
             paths[-1],
             images[-1],
         )
+
+    def _show_ai_generation_progress(self, index: int, path: Path, image: Image.Image) -> None:
+        self.ai_image_path = path
+        self.ai_image = image
+        self._set_ai_preview(image)
+        self.ai_status_var.set(f"กำลังสร้าง {index}/16 • conversation เดียว")
 
     def _finish_ai_preset_success(
         self,
@@ -1439,7 +1563,6 @@ class BlytheA4App(tk.Tk):
             self.six_selection_history = keys
             self.refresh_4x6_selection_status()
             self.show_4x6_preview()
-        self._show_page("4x6")
 
     def _show_page(self, page: str) -> None:
         self.current_page = page
