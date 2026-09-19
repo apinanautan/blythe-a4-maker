@@ -49,6 +49,20 @@ VALID_EXTENSIONS = {".psd", ".png", ".jpg", ".jpeg", ".webp"}
 NUMBER_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
+def design_key(group: int, design_id: str) -> str:
+    """Internal key that keeps identical numbers from different sets separate."""
+    return f"set{group}:{design_id}"
+
+
+def display_design_id(value: str) -> str:
+    return value.split(":", 1)[1] if ":" in value else value
+
+
+def second_source_folder(first_source: Path) -> Path:
+    """Set 2 lives beside set 1 so moving the whole data folder keeps working."""
+    return first_source.parent / "ขายเเบบ2"
+
+
 def load_user_settings() -> dict[str, str]:
     try:
         with SETTINGS_FILE.open("r", encoding="utf-8") as handle:
@@ -722,13 +736,54 @@ class BlytheA4App(tk.Tk):
 
     def reload_assets(self) -> None:
         folder = Path(self.source_var.get())
-        self.assets = discover_assets(folder)
-        self.prepared_assets, self.cache_stats = prepare_asset_cache(self.assets, folder)
-        self.design_ids = [
+        folder2 = second_source_folder(folder)
+
+        source_assets_1 = discover_assets(folder)
+        prepared_1, stats_1 = prepare_asset_cache(source_assets_1, folder)
+
+        source_assets_2 = discover_assets(folder2)
+        if source_assets_2:
+            prepared_2, stats_2 = prepare_asset_cache(source_assets_2, folder2)
+        else:
+            prepared_2 = OrderedDict()
+            stats_2 = {"reused": [], "rebuilt": [], "failed": {}}
+
+        ids_1 = [
             design_id
-            for design_id in visible_design_ids(self.assets)
-            if design_id in self.prepared_assets
+            for design_id in visible_design_ids(source_assets_1)
+            if design_id in prepared_1
         ]
+        ids_2 = [
+            design_id
+            for design_id in visible_design_ids(source_assets_2)
+            if design_id in prepared_2
+        ]
+
+        # Use private set-prefixed IDs internally so, for example, 26 from set 1
+        # and 26 from set 2 can both be selected in the same A4 order.
+        self.assets = OrderedDict()
+        self.prepared_assets = OrderedDict()
+        self.design_ids = []
+        group_ids: dict[int, list[str]] = {1: [], 2: []}
+        for group, source_assets, prepared, raw_ids in (
+            (1, source_assets_1, prepared_1, ids_1),
+            (2, source_assets_2, prepared_2, ids_2),
+        ):
+            for raw_id in raw_ids:
+                key = design_key(group, raw_id)
+                self.assets[key] = source_assets[raw_id]
+                self.prepared_assets[key] = prepared[raw_id]
+                self.design_ids.append(key)
+                group_ids[group].append(key)
+
+        self.cache_stats = {
+            "reused": list(stats_1.get("reused", [])) + list(stats_2.get("reused", [])),
+            "rebuilt": list(stats_1.get("rebuilt", [])) + list(stats_2.get("rebuilt", [])),
+            "failed": {
+                **dict(stats_1.get("failed", {})),
+                **{f"แบบ2:{key}": value for key, value in dict(stats_2.get("failed", {})).items()},
+            },
+        }
         self.selections.clear()
         self.selection_history.clear()
 
@@ -738,8 +793,8 @@ class BlytheA4App(tk.Tk):
         self.thumbnails.clear()
 
         columns = 6
-        for index, design_id in enumerate(self.design_ids):
-            row, col = divmod(index, columns)
+
+        def add_design_button(design_id: str, row: int, col: int) -> None:
             try:
                 preview_source = cached_design_chips(
                     self.prepared_assets,
@@ -754,7 +809,7 @@ class BlytheA4App(tk.Tk):
             self.thumbnails[design_id] = photo
             button = tk.Button(
                 self.number_grid,
-                text=design_id,
+                text=display_design_id(design_id),
                 image=photo,
                 compound="top",
                 width=64,
@@ -777,6 +832,33 @@ class BlytheA4App(tk.Tk):
             button.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
             button.bind("<Button-3>", lambda _event, value=design_id: self.select_and_remove(value))
             self.number_buttons[design_id] = button
+
+        row_cursor = 0
+        for index, design_id in enumerate(group_ids[1]):
+            row_offset, col = divmod(index, columns)
+            add_design_button(design_id, row_cursor + row_offset, col)
+
+        if group_ids[1]:
+            row_cursor += (len(group_ids[1]) + columns - 1) // columns
+
+        if group_ids[2]:
+            ttk.Label(
+                self.number_grid,
+                text="แบบที่สอง",
+                font=("Segoe UI", 11, "bold"),
+                foreground=UI_ACCENT_DARK,
+            ).grid(
+                row=row_cursor,
+                column=0,
+                columnspan=columns,
+                sticky="w",
+                padx=4,
+                pady=(12, 6),
+            )
+            row_cursor += 1
+            for index, design_id in enumerate(group_ids[2]):
+                row_offset, col = divmod(index, columns)
+                add_design_button(design_id, row_cursor + row_offset, col)
 
         for col in range(columns):
             self.number_grid.columnconfigure(col, weight=1)
@@ -856,7 +938,11 @@ class BlytheA4App(tk.Tk):
         for design_id, button in self.number_buttons.items():
             count = self.selections.get(design_id, 0)
             button.configure(
-                text=f"{design_id}   ×{count}" if count else design_id,
+                text=(
+                    f"{display_design_id(design_id)}   ×{count}"
+                    if count
+                    else display_design_id(design_id)
+                ),
                 relief="flat",
                 bg=UI_ACCENT_SOFT if count else UI_SURFACE,
                 fg=UI_ACCENT_DARK if count else UI_TEXT,
