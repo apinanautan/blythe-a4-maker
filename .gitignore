@@ -3,4 +3,6 @@ __pycache__/
 _test_output/
 _*.png
 .venv/
-
+build/
+dist/
+*.spec

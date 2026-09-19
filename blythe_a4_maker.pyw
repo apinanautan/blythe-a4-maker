@@ -7,6 +7,8 @@ import json
 import os
 from collections import OrderedDict
 from datetime import datetime
+from functools import lru_cache
+import statistics
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -17,7 +19,19 @@ from PIL import Image, ImageChops, ImageOps, ImageTk
 DPI = 300
 A4_WIDTH = 2480
 A4_HEIGHT = 3508
+SIX_BY_FOUR_WIDTH = 1800
+SIX_BY_FOUR_HEIGHT = 1200
+SIX_BY_FOUR_COLUMNS = 8
+SIX_BY_FOUR_ROWS = 4
+SIX_BY_FOUR_X0 = 190
+SIX_BY_FOUR_Y0 = 230
+SIX_BY_FOUR_X_PITCH = 200
+SIX_BY_FOUR_Y_PITCH = 245
+SIX_BY_FOUR_SOURCE_X_CENTERS = (188, 391, 599, 797, 999, 1203, 1393, 1591)
+SIX_BY_FOUR_SOURCE_Y_CENTERS = (237, 473, 737, 971)
 DEFAULT_DIAMETER_MM = 14.5
+SIX_BY_FOUR_EYE_PX = 161
+SIX_BY_FOUR_DIAMETER_MM = SIX_BY_FOUR_EYE_PX * 25.4 / DPI
 DEFAULT_COLUMNS = 12
 H_GAP = 28
 V_GAP = 33
@@ -42,6 +56,8 @@ UI_BORDER = "#D6E9DE"
 
 DEFAULT_SOURCE = Path.home() / "Dropbox" / "พีซี" / "ตาน้องบลาย" / "ขายเเบบ1"
 DEFAULT_OUTPUT = DEFAULT_SOURCE.parent / "A4_ลูกค้า"
+DEFAULT_SOURCE_4X6 = DEFAULT_SOURCE.parent / "ไฟล์ตา"
+DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
@@ -106,6 +122,183 @@ def discover_assets(folder: Path) -> OrderedDict[str, Path]:
     return OrderedDict(
         (key, found[key]) for key in sorted(found, key=natural_number_key)
     )
+
+
+
+def four_sheet_sort_key(value: str) -> tuple[int, int, str]:
+    numbers = re.findall(r"\d+", value)
+    if numbers:
+        return (0, int(numbers[0]), value.casefold())
+    return (1, 10**9, value.casefold())
+
+
+def discover_4x6_sheets(folder: Path) -> OrderedDict[str, Path]:
+    """Find real 6x4-inch source sheets only. A4-sized images are ignored."""
+    found: dict[str, Path] = {}
+    if not folder.exists():
+        return OrderedDict()
+
+    extension_rank = {".png": 0, ".webp": 1, ".jpg": 2, ".jpeg": 3}
+    for path in folder.iterdir():
+        suffix = path.suffix.lower()
+        if not path.is_file() or suffix not in extension_rank:
+            continue
+        try:
+            with Image.open(path) as opened:
+                if opened.size != (SIX_BY_FOUR_WIDTH, SIX_BY_FOUR_HEIGHT):
+                    continue
+        except OSError:
+            continue
+        old = found.get(path.stem)
+        if old is None or extension_rank[suffix] < extension_rank[old.suffix.lower()]:
+            found[path.stem] = path
+
+    return OrderedDict((key, found[key]) for key in sorted(found, key=four_sheet_sort_key))
+
+
+def four_pair_key(sheet_name: str, pair_index: int) -> str:
+    return f"{sheet_name}::pair{pair_index}"
+
+
+def _local_eye_center(
+    source: Image.Image,
+    approx_x: int,
+    approx_y: int,
+) -> tuple[int, int] | None:
+    """Locate one eye inside its grid cell without changing its scale."""
+    half_width = 100
+    half_height = 110
+    box = (
+        max(0, approx_x - half_width),
+        max(0, approx_y - half_height),
+        min(source.width, approx_x + half_width + 1),
+        min(source.height, approx_y + half_height + 1),
+    )
+    crop = source.crop(box)
+    difference = ImageChops.difference(
+        crop,
+        Image.new("RGB", crop.size, "white"),
+    ).convert("L")
+    mask = difference.point(lambda value: 255 if value > 10 else 0)
+    bbox = mask.getbbox()
+    if bbox is None:
+        return None
+
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    # Normal eye artwork in the source sheets is roughly 160 px across.
+    # Reject large/odd artwork so a non-standard sheet cannot skew the grid.
+    if min(width, height) < 110 or max(width, height) > 190:
+        return None
+
+    center_x = box[0] + round((bbox[0] + bbox[2]) / 2)
+    center_y = box[1] + round((bbox[1] + bbox[3]) / 2)
+    return center_x, center_y
+
+
+@lru_cache(maxsize=128)
+def _detect_4x6_centers_cached(
+    path_text: str,
+    mtime_ns: int,
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    path = Path(path_text)
+    with Image.open(path) as opened:
+        source = flatten_to_white(opened)
+
+    centers: list[tuple[tuple[int, int], ...]] = []
+    for approx_y in SIX_BY_FOUR_SOURCE_Y_CENTERS:
+        row_centers: list[tuple[int, int]] = []
+        for approx_x in SIX_BY_FOUR_SOURCE_X_CENTERS:
+            center = _local_eye_center(source, approx_x, approx_y)
+            row_centers.append(center if center is not None else (approx_x, approx_y))
+        centers.append(tuple(row_centers))
+    return tuple(centers)
+
+
+def detect_4x6_centers(
+    path: Path,
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """Return the actual center of each source eye; cache invalidates on file changes."""
+    resolved = path.expanduser().resolve()
+    return _detect_4x6_centers_cached(str(resolved), resolved.stat().st_mtime_ns)
+
+
+def extract_4x6_pair(
+    path: Path,
+    pair_index: int,
+    size_px: int | None = None,
+) -> tuple[Image.Image, Image.Image]:
+    """Copy one pair from its source sheet pixel-for-pixel at the original scale."""
+    if pair_index < 1 or pair_index > 16:
+        raise ValueError("คู่ตา 4x6 ต้องอยู่ระหว่าง 1-16")
+    if size_px is None:
+        size_px = SIX_BY_FOUR_EYE_PX
+
+    with Image.open(path) as opened:
+        source = flatten_to_white(opened)
+
+    if source.size != (SIX_BY_FOUR_WIDTH, SIX_BY_FOUR_HEIGHT):
+        raise ValueError(f"{path.name} ไม่ใช่ไฟล์ 6x4 นิ้ว 1800x1200")
+
+    centers = detect_4x6_centers(path)
+    row = (pair_index - 1) // 4
+    pair_col = (pair_index - 1) % 4
+    chips: list[Image.Image] = []
+
+    for eye_col in (pair_col * 2, pair_col * 2 + 1):
+        center_x, center_y = centers[row][eye_col]
+        left = round(center_x - size_px / 2)
+        top = round(center_y - size_px / 2)
+        right = left + size_px
+        bottom = top + size_px
+        if left < 0 or top < 0 or right > source.width or bottom > source.height:
+            raise ValueError(f"ตำแหน่งตาใน {path.name} อยู่นอกขอบไฟล์")
+        chips.append(source.crop((left, top, right, bottom)))
+
+    return chips[0], chips[1]
+
+
+def extract_all_4x6_pairs(
+    path: Path,
+    size_px: int | None = None,
+) -> list[tuple[Image.Image, Image.Image]]:
+    if size_px is None:
+        size_px = SIX_BY_FOUR_EYE_PX
+
+    with Image.open(path) as opened:
+        source = flatten_to_white(opened)
+
+    if source.size != (SIX_BY_FOUR_WIDTH, SIX_BY_FOUR_HEIGHT):
+        raise ValueError(f"{path.name} ไม่ใช่ไฟล์ 6x4 นิ้ว 1800x1200")
+
+    centers = detect_4x6_centers(path)
+    pairs: list[tuple[Image.Image, Image.Image]] = []
+    for pair_index in range(1, 17):
+        row = (pair_index - 1) // 4
+        pair_col = (pair_index - 1) % 4
+        pair_images: list[Image.Image] = []
+
+        for eye_col in (pair_col * 2, pair_col * 2 + 1):
+            center_x, center_y = centers[row][eye_col]
+            left = round(center_x - size_px / 2)
+            top = round(center_y - size_px / 2)
+            right = left + size_px
+            bottom = top + size_px
+            if left < 0 or top < 0 or right > source.width or bottom > source.height:
+                raise ValueError(f"ตำแหน่งตาใน {path.name} อยู่นอกขอบไฟล์")
+            pair_images.append(source.crop((left, top, right, bottom)))
+
+        pairs.append((pair_images[0], pair_images[1]))
+    return pairs
+
+
+def make_pair_ui_thumbnail(left: Image.Image, right: Image.Image) -> Image.Image:
+    eye_size = 34
+    gap = 4
+    canvas = Image.new("RGBA", (eye_size * 2 + gap, eye_size), (0, 0, 0, 0))
+    canvas.alpha_composite(make_round_ui_thumbnail(left, eye_size), (0, 0))
+    canvas.alpha_composite(make_round_ui_thumbnail(right, eye_size), (eye_size + gap, 0))
+    return canvas
 
 
 def flatten_to_white(image: Image.Image) -> Image.Image:
@@ -485,6 +678,97 @@ def build_a4_pages(
     return outputs
 
 
+
+
+def prepare_4x6_layout(
+    pair_refs: dict[str, tuple[Path, int]],
+    selection_sequence: list[str],
+    diameter_mm: float = SIX_BY_FOUR_DIAMETER_MM,
+) -> tuple[list[Image.Image], int, int]:
+    if diameter_mm <= 0:
+        raise ValueError("ขนาดตาต้องมากกว่า 0 มม.")
+
+    size_px = diameter_to_pixels(diameter_mm)
+    if size_px > min(SIX_BY_FOUR_X_PITCH, SIX_BY_FOUR_Y_PITCH):
+        raise ValueError("ขนาดตาใหญ่เกินกริด 4×6")
+
+    slots: list[Image.Image] = []
+    for pair_key in selection_sequence:
+        ref = pair_refs.get(pair_key)
+        if ref is None:
+            raise ValueError(f"ไม่พบคู่ตา {pair_key}")
+        path, pair_index = ref
+        left, right = extract_4x6_pair(path, pair_index, size_px)
+        slots.extend((left, right))
+
+    return slots, size_px, SIX_BY_FOUR_COLUMNS * SIX_BY_FOUR_ROWS
+
+
+def render_4x6_page(
+    pair_refs: dict[str, tuple[Path, int]],
+    selection_sequence: list[str],
+    page_index: int = 0,
+    diameter_mm: float = SIX_BY_FOUR_DIAMETER_MM,
+) -> Image.Image:
+    slots, size_px, capacity = prepare_4x6_layout(
+        pair_refs, selection_sequence, diameter_mm
+    )
+    page = Image.new("RGB", (SIX_BY_FOUR_WIDTH, SIX_BY_FOUR_HEIGHT), "white")
+    start = page_index * capacity
+    page_slots = slots[start : start + capacity]
+    radius = size_px / 2
+
+    for index, chip in enumerate(page_slots):
+        row, col = divmod(index, SIX_BY_FOUR_COLUMNS)
+        center_x = SIX_BY_FOUR_SOURCE_X_CENTERS[col]
+        center_y = SIX_BY_FOUR_SOURCE_Y_CENTERS[row]
+        x = round(center_x - radius)
+        y = round(center_y - radius)
+        page.paste(chip, (x, y))
+
+    return page
+
+
+def build_4x6_pages(
+    pair_refs: dict[str, tuple[Path, int]],
+    selection_sequence: list[str],
+    output_dir: Path,
+    customer_name: str = "",
+    diameter_mm: float = SIX_BY_FOUR_DIAMETER_MM,
+) -> list[Path]:
+    if not selection_sequence:
+        raise ValueError("ยังไม่ได้เลือกคู่ตา")
+
+    slots, _size_px, capacity = prepare_4x6_layout(
+        pair_refs, selection_sequence, diameter_mm
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = sanitize_filename(customer_name)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"4x6_{safe_name}_{stamp}" if safe_name else f"4x6_{stamp}"
+    page_count = (len(slots) + capacity - 1) // capacity
+    outputs: list[Path] = []
+
+    for page_index in range(page_count):
+        page = render_4x6_page(
+            pair_refs,
+            selection_sequence,
+            page_index,
+            diameter_mm,
+        )
+        suffix = f"_p{page_index + 1}" if page_count > 1 else ""
+        output = output_dir / f"{base_name}{suffix}.png"
+        page.save(output, format="PNG", dpi=(DPI, DPI))
+        outputs.append(output)
+
+    return outputs
+
+def selected_piece_count(selections: OrderedDict[str, int]) -> int:
+    return sum(
+        count * (1 if is_single_piece_id(display_design_id(design_id)) else 2)
+        for design_id, count in selections.items()
+    )
+
 def parse_quick_numbers(text: str) -> list[str]:
     return [item for item in re.split(r"[\s,;/]+", text.strip()) if item]
 
@@ -492,7 +776,7 @@ def parse_quick_numbers(text: str) -> list[str]:
 class BlytheA4App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Blythe Eye A4 Maker")
+        self.title("Blythe Eye Maker")
         self.geometry("760x560")
         self.minsize(680, 500)
         self.configure(bg=UI_BG)
@@ -500,12 +784,23 @@ class BlytheA4App(tk.Tk):
 
         saved_settings = load_user_settings()
         saved_source = saved_settings.get("source_folder", "").strip()
+        saved_source_4x6 = saved_settings.get("source_4x6_folder", "").strip()
         initial_source = Path(saved_source) if saved_source else DEFAULT_SOURCE
+        initial_source_4x6 = (
+            Path(saved_source_4x6)
+            if saved_source_4x6
+            else initial_source.parent / "ไฟล์ตา"
+        )
 
         self.source_var = tk.StringVar(value=str(initial_source))
+        self.source_4x6_var = tk.StringVar(value=str(initial_source_4x6))
         self.output_var = tk.StringVar(value=str(initial_source.parent / "A4_ลูกค้า"))
+        self.output_4x6_var = tk.StringVar(value=str(initial_source_4x6.parent / "4x6_ลูกค้า"))
         self.customer_var = tk.StringVar()
         self.cache_var = tk.StringVar(value="กำลังตรวจไฟล์...")
+        self.six_status_var = tk.StringVar(value="0 / 16 คู่")
+        self.six_sheet_var = tk.StringVar()
+        self.current_page = "a4"
 
         self.assets: OrderedDict[str, Path] = OrderedDict()
         self.prepared_assets: OrderedDict[str, tuple[Path, ...]] = OrderedDict()
@@ -516,13 +811,22 @@ class BlytheA4App(tk.Tk):
         self.number_buttons: dict[str, tk.Button] = {}
         self.thumbnails: dict[str, ImageTk.PhotoImage] = {}
         self.preview_photo: ImageTk.PhotoImage | None = None
+        self.six_sheets: OrderedDict[str, Path] = OrderedDict()
+        self.six_pair_refs: OrderedDict[str, tuple[Path, int]] = OrderedDict()
+        self.six_selections: OrderedDict[str, int] = OrderedDict()
+        self.six_selection_history: list[str] = []
+        self.six_number_buttons: dict[str, tk.Button] = {}
+        self.six_thumbnails: dict[str, ImageTk.PhotoImage] = {}
+        self.six_preview_photo: ImageTk.PhotoImage | None = None
 
         self._build_ui()
-        if Path(self.source_var.get()).exists():
+        source_a4_ok = Path(self.source_var.get()).is_dir()
+        source_4x6_ok = Path(self.source_4x6_var.get()).is_dir()
+        if source_a4_ok and source_4x6_ok:
             self.reload_assets()
         else:
-            self.cache_var.set("เลือกโฟลเดอร์ลายตาครั้งแรก")
-            self.after(150, self.choose_source)
+            self.cache_var.set("ตั้งค่า Source ครั้งแรก")
+            self.after(150, self.open_settings)
 
     def _configure_theme(self) -> None:
         style = ttk.Style(self)
@@ -576,12 +880,6 @@ class BlytheA4App(tk.Tk):
         info.pack(fill="x")
         ttk.Label(info, text="ลูกค้า", font=("Segoe UI", 9, "bold")).pack(side="left")
         ttk.Entry(info, textvariable=self.customer_var, width=18).pack(side="left", padx=(5, 10))
-        ttk.Label(
-            info,
-            text="A4  •  14.5 mm",
-            font=("Segoe UI", 9, "bold"),
-            foreground=UI_ACCENT_DARK,
-        ).pack(side="left")
         ttk.Label(info, textvariable=self.cache_var, style="Muted.TLabel").pack(side="left", padx=(10, 0))
         tk.Button(
             info,
@@ -599,8 +897,47 @@ class BlytheA4App(tk.Tk):
             highlightthickness=0,
         ).pack(side="right")
 
-        body = ttk.Frame(outer)
-        body.pack(fill="both", expand=True, pady=(6, 0))
+        nav = tk.Frame(outer, bg=UI_BG)
+        nav.pack(fill="x", pady=(7, 6))
+        self.a4_nav_button = tk.Button(
+            nav,
+            text="A4",
+            command=lambda: self._show_page("a4"),
+            relief="flat",
+            bd=0,
+            padx=18,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self.a4_nav_button.pack(side="left")
+        self.six_nav_button = tk.Button(
+            nav,
+            text="4×6 นิ้ว",
+            command=lambda: self._show_page("4x6"),
+            relief="flat",
+            bd=0,
+            padx=18,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self.six_nav_button.pack(side="left", padx=(4, 0))
+
+        self.page_host = ttk.Frame(outer)
+        self.page_host.pack(fill="both", expand=True)
+        self.a4_page = ttk.Frame(self.page_host)
+        self.six_page = ttk.Frame(self.page_host)
+        self._build_a4_page(self.a4_page)
+        self._build_4x6_page(self.six_page)
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        self._show_page("a4")
+
+    def _build_a4_page(self, parent: ttk.Frame) -> None:
+        body = ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
 
         number_box = ttk.Frame(body)
         number_box.pack(side="left", fill="both", expand=True)
@@ -614,16 +951,12 @@ class BlytheA4App(tk.Tk):
         self.number_window = self.number_canvas.create_window((0, 0), window=self.number_grid, anchor="nw")
         self.number_grid.bind("<Configure>", self._update_scrollregion)
         self.number_canvas.bind("<Configure>", self._resize_number_grid)
-        self.number_canvas.bind_all(
-            "<MouseWheel>",
-            lambda event: self.number_canvas.yview_scroll(int(-event.delta / 120), "units"),
-        )
 
         preview = ttk.Frame(body, padding=(8, 0, 0, 0))
         preview.pack(side="right", fill="y")
         ttk.Label(
             preview,
-            text="ตัวอย่าง",
+            text="A4  •  ตัวอย่าง",
             font=("Segoe UI", 10, "bold"),
             foreground=UI_ACCENT_DARK,
         ).pack()
@@ -645,13 +978,115 @@ class BlytheA4App(tk.Tk):
             padx=10,
             pady=10,
             cursor="hand2",
+            bd=0,
+            highlightthickness=0,
         ).pack(fill="x")
+
+    def _build_4x6_page(self, parent: ttk.Frame) -> None:
+        body = ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
+
+        number_box = ttk.Frame(body)
+        number_box.pack(side="left", fill="both", expand=True)
+
+        chooser = ttk.Frame(number_box)
+        chooser.pack(fill="x", pady=(0, 6))
+        ttk.Label(
+            chooser,
+            text="ไฟล์ 4×6",
+            font=("Segoe UI", 9, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack(side="left")
+        self.six_sheet_combo = ttk.Combobox(
+            chooser,
+            textvariable=self.six_sheet_var,
+            state="readonly",
+            width=28,
+        )
+        self.six_sheet_combo.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.six_sheet_combo.bind("<<ComboboxSelected>>", self._on_4x6_sheet_changed)
+
+        self.six_number_canvas = tk.Canvas(number_box, highlightthickness=0, bg=UI_BG)
+        scrollbar = ttk.Scrollbar(number_box, orient="vertical", command=self.six_number_canvas.yview)
+        self.six_number_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.six_number_canvas.pack(side="left", fill="both", expand=True)
+        self.six_number_grid = ttk.Frame(self.six_number_canvas)
+        self.six_number_window = self.six_number_canvas.create_window(
+            (0, 0), window=self.six_number_grid, anchor="nw"
+        )
+        self.six_number_grid.bind("<Configure>", self._update_4x6_scrollregion)
+        self.six_number_canvas.bind("<Configure>", self._resize_4x6_number_grid)
+
+        preview = ttk.Frame(body, padding=(8, 0, 0, 0))
+        preview.pack(side="right", fill="y")
+        ttk.Label(
+            preview,
+            text="6×4 นิ้ว  •  Custom",
+            font=("Segoe UI", 10, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack()
+        self.six_preview_label = tk.Label(
+            preview,
+            bg="white",
+            bd=1,
+            relief="solid",
+            highlightthickness=0,
+        )
+        self.six_preview_label.pack(pady=(6, 5))
+        ttk.Label(preview, textvariable=self.six_status_var, style="Muted.TLabel").pack(pady=(0, 7))
+        ttk.Button(preview, text="ลบล่าสุด", command=self.undo_last_4x6_selection).pack(fill="x", pady=(0, 4))
+        ttk.Button(preview, text="ล้างทั้งหมด", command=self.clear_4x6_selection).pack(fill="x", pady=(0, 4))
+        ttk.Button(preview, text="โฟลเดอร์", command=self.open_4x6_output_folder).pack(fill="x", pady=(0, 8))
+        tk.Button(
+            preview,
+            text="สร้าง 4×6",
+            command=self.generate_4x6,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 12, "bold"),
+            relief="flat",
+            padx=10,
+            pady=10,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+        ).pack(fill="x")
+
+    def _show_page(self, page: str) -> None:
+        self.current_page = page
+        self.a4_page.pack_forget()
+        self.six_page.pack_forget()
+        active_bg = UI_ACCENT
+        inactive_bg = UI_SURFACE
+        if page == "4x6":
+            self.six_page.pack(fill="both", expand=True)
+            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.six_nav_button.configure(bg=active_bg, fg="white")
+            self.show_4x6_preview()
+        else:
+            self.a4_page.pack(fill="both", expand=True)
+            self.a4_nav_button.configure(bg=active_bg, fg="white")
+            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+            self.show_preview()
+
+    def _on_mousewheel(self, event) -> None:
+        canvas = self.six_number_canvas if self.current_page == "4x6" else self.number_canvas
+        canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _update_scrollregion(self, _event=None) -> None:
         self.number_canvas.configure(scrollregion=self.number_canvas.bbox("all"))
 
     def _resize_number_grid(self, event) -> None:
         self.number_canvas.itemconfigure(self.number_window, width=event.width)
+
+    def _update_4x6_scrollregion(self, _event=None) -> None:
+        self.six_number_canvas.configure(scrollregion=self.six_number_canvas.bbox("all"))
+
+    def _resize_4x6_number_grid(self, event) -> None:
+        self.six_number_canvas.itemconfigure(self.six_number_window, width=event.width)
 
     def choose_source(self) -> None:
         current = Path(self.source_var.get()) if self.source_var.get() else DEFAULT_SOURCE
@@ -660,20 +1095,43 @@ class BlytheA4App(tk.Tk):
         if folder:
             self.set_source_folder(Path(folder))
 
+    def _save_source_settings(self) -> None:
+        save_user_settings(
+            {
+                "source_folder": self.source_var.get(),
+                "source_4x6_folder": self.source_4x6_var.get(),
+            }
+        )
+
     def set_source_folder(self, folder: Path, persist: bool = True) -> None:
         folder = folder.expanduser().resolve()
         if not folder.exists() or not folder.is_dir():
-            messagebox.showwarning("ไม่พบโฟลเดอร์", "กรุณาเลือกโฟลเดอร์ Source Data ที่มีอยู่จริง")
+            messagebox.showwarning("ไม่พบโฟลเดอร์", "กรุณาเลือกโฟลเดอร์ A4 Source ที่มีอยู่จริง")
             return
 
         self.source_var.set(str(folder))
         self.output_var.set(str(folder.parent / "A4_ลูกค้า"))
         if persist:
             try:
-                save_user_settings({"source_folder": str(folder)})
+                self._save_source_settings()
             except OSError as exc:
                 messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc))
         self.reload_assets()
+
+    def set_4x6_source_folder(self, folder: Path, persist: bool = True) -> None:
+        folder = folder.expanduser().resolve()
+        if not folder.exists() or not folder.is_dir():
+            messagebox.showwarning("ไม่พบโฟลเดอร์", "กรุณาเลือกโฟลเดอร์ 4×6 Source ที่มีอยู่จริง")
+            return
+
+        self.source_4x6_var.set(str(folder))
+        self.output_4x6_var.set(str(folder.parent / "4x6_ลูกค้า"))
+        if persist:
+            try:
+                self._save_source_settings()
+            except OSError as exc:
+                messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc))
+        self.reload_4x6_assets()
 
     def open_settings(self) -> None:
         dialog = tk.Toplevel(self)
@@ -685,46 +1143,74 @@ class BlytheA4App(tk.Tk):
 
         frame = ttk.Frame(dialog, padding=14)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Source Data", font=("Segoe UI", 10, "bold")).grid(
+
+        a4_var = tk.StringVar(value=self.source_var.get())
+        six_var = tk.StringVar(value=self.source_4x6_var.get())
+
+        ttk.Label(frame, text="Source A4  •  ขายแบบ1", font=("Segoe UI", 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
-        ttk.Label(frame, text="โฟลเดอร์ที่เก็บไฟล์ลายตา").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(2, 8)
-        )
+        ttk.Label(
+            frame,
+            text="โปรแกรมจะอ่านโฟลเดอร์ขายแบบ2 ที่อยู่ข้างกันให้อัตโนมัติ",
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 5))
+        ttk.Entry(frame, textvariable=a4_var, width=54).grid(row=2, column=0, sticky="ew", pady=(0, 10))
 
-        source_setting_var = tk.StringVar(value=self.source_var.get())
-        entry = ttk.Entry(frame, textvariable=source_setting_var, width=54)
-        entry.grid(row=2, column=0, sticky="ew")
-
-        def browse() -> None:
-            current = Path(source_setting_var.get()) if source_setting_var.get() else Path.home()
+        def browse_into(target: tk.StringVar, title: str) -> None:
+            current = Path(target.get()) if target.get() else Path.home()
             initial = current if current.exists() else Path.home()
-            selected = filedialog.askdirectory(
-                parent=dialog,
-                initialdir=str(initial),
-                title="เลือกโฟลเดอร์ Source Data",
-            )
+            selected = filedialog.askdirectory(parent=dialog, initialdir=str(initial), title=title)
             if selected:
-                source_setting_var.set(selected)
+                target.set(selected)
 
-        ttk.Button(frame, text="เลือก...", command=browse).grid(row=2, column=1, padx=(6, 0))
+        ttk.Button(
+            frame,
+            text="เลือก...",
+            command=lambda: browse_into(a4_var, "เลือกโฟลเดอร์ Source A4"),
+        ).grid(row=2, column=1, padx=(6, 0), pady=(0, 10))
+
+        ttk.Label(frame, text="Source 4×6  •  ไฟล์ตา", font=("Segoe UI", 10, "bold")).grid(
+            row=3, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Label(frame, text="โฟลเดอร์ไฟล์ตา 1800×1200 สำหรับหน้าคัสตอม", style="Muted.TLabel").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(2, 6)
+        )
+        ttk.Entry(frame, textvariable=six_var, width=54).grid(row=5, column=0, sticky="ew")
+        ttk.Button(
+            frame,
+            text="เลือก...",
+            command=lambda: browse_into(six_var, "เลือกโฟลเดอร์ Source 4×6"),
+        ).grid(row=5, column=1, padx=(6, 0))
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
-            value = source_setting_var.get().strip()
-            if not value:
-                messagebox.showwarning("ยังไม่ได้เลือก", "กรุณาเลือกโฟลเดอร์ Source Data", parent=dialog)
+            a4_value = a4_var.get().strip()
+            six_value = six_var.get().strip()
+            a4_folder = Path(a4_value).expanduser()
+            six_folder = Path(six_value).expanduser()
+            if not a4_value or not a4_folder.is_dir():
+                messagebox.showwarning("ไม่พบโฟลเดอร์", "Source A4 ไม่ถูกต้อง", parent=dialog)
                 return
-            folder = Path(value).expanduser()
-            if not folder.exists() or not folder.is_dir():
-                messagebox.showwarning("ไม่พบโฟลเดอร์", "โฟลเดอร์ที่เลือกไม่มีอยู่จริง", parent=dialog)
+            if not six_value or not six_folder.is_dir():
+                messagebox.showwarning("ไม่พบโฟลเดอร์", "Source 4×6 ไม่ถูกต้อง", parent=dialog)
                 return
+
+            self.source_var.set(str(a4_folder.resolve()))
+            self.source_4x6_var.set(str(six_folder.resolve()))
+            self.output_var.set(str(a4_folder.resolve().parent / "A4_ลูกค้า"))
+            self.output_4x6_var.set(str(six_folder.resolve().parent / "4x6_ลูกค้า"))
+            try:
+                self._save_source_settings()
+            except OSError as exc:
+                messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc), parent=dialog)
+
             dialog.grab_release()
             dialog.destroy()
-            self.set_source_folder(folder)
+            self.reload_assets()
 
         ttk.Button(buttons, text="บันทึก", command=save_and_close).pack(side="left")
         frame.columnconfigure(0, weight=1)
@@ -732,7 +1218,6 @@ class BlytheA4App(tk.Tk):
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
-        entry.focus_set()
 
     def reload_assets(self) -> None:
         folder = Path(self.source_var.get())
@@ -759,8 +1244,6 @@ class BlytheA4App(tk.Tk):
             if design_id in prepared_2
         ]
 
-        # Use private set-prefixed IDs internally so, for example, 26 from set 1
-        # and 26 from set 2 can both be selected in the same A4 order.
         self.assets = OrderedDict()
         self.prepared_assets = OrderedDict()
         self.design_ids = []
@@ -784,9 +1267,9 @@ class BlytheA4App(tk.Tk):
                 **{f"แบบ2:{key}": value for key, value in dict(stats_2.get("failed", {})).items()},
             },
         }
+
         self.selections.clear()
         self.selection_history.clear()
-
         for child in self.number_grid.winfo_children():
             child.destroy()
         self.number_buttons.clear()
@@ -876,6 +1359,95 @@ class BlytheA4App(tk.Tk):
         if not self.design_ids:
             messagebox.showwarning("ไม่พบลายตา", f"ไม่พบไฟล์ที่ชื่อเป็นหมายเลขใน\n{folder}")
 
+        self.reload_4x6_assets()
+
+    def reload_4x6_assets(self) -> None:
+        folder = Path(self.source_4x6_var.get())
+        self.six_sheets = discover_4x6_sheets(folder)
+        self.six_pair_refs = OrderedDict()
+        for sheet_name, path in self.six_sheets.items():
+            for pair_index in range(1, 17):
+                self.six_pair_refs[four_pair_key(sheet_name, pair_index)] = (path, pair_index)
+
+        self.six_selections.clear()
+        self.six_selection_history.clear()
+        values = list(self.six_sheets)
+        self.six_sheet_combo.configure(values=values)
+
+        if values:
+            current = self.six_sheet_var.get()
+            if current not in self.six_sheets:
+                self.six_sheet_var.set(values[0])
+            self._populate_4x6_pair_grid()
+            self.six_status_var.set("0 / 16 คู่")
+        else:
+            self.six_sheet_var.set("")
+            for child in self.six_number_grid.winfo_children():
+                child.destroy()
+            self.six_number_buttons.clear()
+            self.six_thumbnails.clear()
+            self.six_status_var.set("ไม่พบไฟล์ 6×4")
+
+        self.show_4x6_preview()
+
+    def _on_4x6_sheet_changed(self, _event=None) -> None:
+        self._populate_4x6_pair_grid()
+
+    def _populate_4x6_pair_grid(self) -> None:
+        for child in self.six_number_grid.winfo_children():
+            child.destroy()
+        self.six_number_buttons.clear()
+        self.six_thumbnails.clear()
+
+        sheet_name = self.six_sheet_var.get()
+        path = self.six_sheets.get(sheet_name)
+        if path is None:
+            return
+
+        try:
+            pairs = extract_all_4x6_pairs(path)
+        except Exception as exc:
+            self.six_status_var.set(f"อ่านไฟล์ไม่ได้: {exc}")
+            return
+
+        columns = 4
+        for index, (left, right) in enumerate(pairs, start=1):
+            key = four_pair_key(sheet_name, index)
+            photo = ImageTk.PhotoImage(make_pair_ui_thumbnail(left, right))
+            self.six_thumbnails[key] = photo
+            count = self.six_selections.get(key, 0)
+            button = tk.Button(
+                self.six_number_grid,
+                text=(f"คู่ {index}   ×{count}" if count else f"คู่ {index}"),
+                image=photo,
+                compound="top",
+                width=90,
+                height=62,
+                padx=2,
+                pady=2,
+                font=("Segoe UI", 8, "bold"),
+                relief="flat",
+                bd=0,
+                bg=UI_ACCENT_SOFT if count else UI_SURFACE,
+                fg=UI_ACCENT_DARK if count else UI_TEXT,
+                activebackground=UI_ACCENT_SOFT,
+                activeforeground=UI_ACCENT_DARK,
+                highlightthickness=1,
+                highlightbackground=UI_ACCENT if count else UI_BORDER,
+                highlightcolor=UI_ACCENT,
+                cursor="hand2",
+                command=lambda value=key: self.select_4x6_and_add(value),
+            )
+            row, col = divmod(index - 1, columns)
+            button.grid(row=row, column=col, padx=3, pady=3, sticky="nsew")
+            button.bind("<Button-3>", lambda _event, value=key: self.select_4x6_and_remove(value))
+            self.six_number_buttons[key] = button
+
+        for col in range(columns):
+            self.six_number_grid.columnconfigure(col, weight=1)
+        self.six_number_canvas.yview_moveto(0)
+        self.refresh_4x6_selection_status()
+
     def show_preview(self, design_id: str | None = None) -> None:
         try:
             page = render_a4_page(
@@ -949,6 +1521,111 @@ class BlytheA4App(tk.Tk):
                 highlightbackground=UI_ACCENT if count else UI_BORDER,
             )
 
+
+
+    def show_4x6_preview(self, design_id: str | None = None) -> None:
+        try:
+            page = render_4x6_page(
+                self.six_pair_refs,
+                self.six_selection_history,
+            )
+            image = ImageOps.contain(page, (270, 180), Image.Resampling.LANCZOS)
+            self.six_preview_photo = ImageTk.PhotoImage(image)
+            self.six_preview_label.configure(image=self.six_preview_photo)
+        except Exception:
+            pass
+
+    def select_4x6_and_add(self, design_id: str) -> None:
+        if design_id not in self.six_pair_refs:
+            return
+        self.six_selections[design_id] = self.six_selections.get(design_id, 0) + 1
+        self.six_selection_history.append(design_id)
+        self.refresh_4x6_selection_status()
+        self.show_4x6_preview(design_id)
+
+    def select_4x6_and_remove(self, design_id: str) -> None:
+        count = self.six_selections.get(design_id, 0)
+        if not count:
+            return
+        if count <= 1:
+            self.six_selections.pop(design_id, None)
+        else:
+            self.six_selections[design_id] = count - 1
+        for index in range(len(self.six_selection_history) - 1, -1, -1):
+            if self.six_selection_history[index] == design_id:
+                self.six_selection_history.pop(index)
+                break
+        self.refresh_4x6_selection_status()
+        self.show_4x6_preview(design_id)
+
+    def undo_last_4x6_selection(self) -> None:
+        if not self.six_selection_history:
+            return
+        design_id = self.six_selection_history.pop()
+        count = self.six_selections.get(design_id, 0)
+        if count <= 1:
+            self.six_selections.pop(design_id, None)
+        else:
+            self.six_selections[design_id] = count - 1
+        self.refresh_4x6_selection_status()
+        self.show_4x6_preview(design_id)
+
+    def clear_4x6_selection(self) -> None:
+        self.six_selections.clear()
+        self.six_selection_history.clear()
+        self.refresh_4x6_selection_status()
+        self.show_4x6_preview()
+
+    def refresh_4x6_selection_status(self) -> None:
+        for design_id, button in self.six_number_buttons.items():
+            count = self.six_selections.get(design_id, 0)
+            ref = self.six_pair_refs.get(design_id)
+            pair_index = ref[1] if ref else "?"
+            button.configure(
+                text=(f"คู่ {pair_index}   ×{count}" if count else f"คู่ {pair_index}"),
+                relief="flat",
+                bg=UI_ACCENT_SOFT if count else UI_SURFACE,
+                fg=UI_ACCENT_DARK if count else UI_TEXT,
+                highlightbackground=UI_ACCENT if count else UI_BORDER,
+            )
+
+        pairs = len(self.six_selection_history)
+        capacity = (SIX_BY_FOUR_COLUMNS * SIX_BY_FOUR_ROWS) // 2
+        pages = max(1, (pairs + capacity - 1) // capacity)
+        if pairs <= capacity:
+            self.six_status_var.set(f"{pairs} / {capacity} คู่")
+        else:
+            self.six_status_var.set(f"{pairs} คู่  •  {pages} หน้า")
+
+    def output_4x6_dir(self) -> Path:
+        return Path(self.output_4x6_var.get())
+
+    def open_4x6_output_folder(self) -> None:
+        folder = self.output_4x6_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["explorer", str(folder)])
+
+    def generate_4x6(self) -> None:
+        if not self.six_selection_history:
+            messagebox.showwarning("ยังไม่ได้เลือก", "กรุณาเลือกคู่ตาจากไฟล์ 4×6 ก่อน")
+            return
+
+        try:
+            outputs = build_4x6_pages(
+                self.six_pair_refs,
+                self.six_selection_history,
+                self.output_4x6_dir(),
+                customer_name=self.customer_var.get(),
+                diameter_mm=SIX_BY_FOUR_DIAMETER_MM,
+            )
+        except Exception as exc:
+            messagebox.showerror("สร้างไฟล์ไม่สำเร็จ", str(exc))
+            return
+
+        messagebox.showinfo(
+            "สร้างเสร็จแล้ว",
+            f"สร้าง {len(outputs)} ไฟล์ 4×6 แล้ว\n\n" + "\n".join(str(path) for path in outputs),
+        )
 
     def output_dir(self) -> Path:
         return Path(self.output_var.get())
