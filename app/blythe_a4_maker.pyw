@@ -345,6 +345,34 @@ def download_latest_release_exe(work_dir: Path) -> Path:
     return download_release_asset(release, APP_EXECUTABLE_NAME, work_dir / APP_EXECUTABLE_NAME)
 
 
+def apply_app_icon(window: tk.Misc) -> None:
+    """Give the window and taskbar the full-size icon instead of a stretched small one."""
+    icon_path = app_resource_path("branding", "BlytheEyeMaker.ico")
+    if not icon_path.is_file():
+        return
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BlytheEyeMaker")
+        except (AttributeError, OSError):
+            pass
+    try:
+        window.iconbitmap(default=str(icon_path))
+    except tk.TclError:
+        pass
+    try:
+        with Image.open(icon_path) as icon:
+            photos = []
+            for size in (256, 128, 64, 48, 32, 16):
+                icon.size = (size, size)
+                photos.append(ImageTk.PhotoImage(icon.convert("RGBA"), master=window))
+        window.iconphoto(True, *photos)
+        window._app_icon_photos = photos  # keep references so Tk does not drop them
+    except (OSError, ValueError, tk.TclError):
+        pass
+
+
 def ensure_release_assets() -> bool:
     """Download the matching cover assets on first run of a standalone EXE."""
     if not getattr(sys, "frozen", False):
@@ -364,12 +392,7 @@ def ensure_release_assets() -> bool:
     root.geometry("430x185")
     root.resizable(False, False)
     root.configure(bg=UI_BG)
-    icon_path = app_resource_path("branding", "BlytheEyeMaker.ico")
-    if icon_path.is_file():
-        try:
-            root.iconbitmap(str(icon_path))
-        except tk.TclError:
-            pass
+    apply_app_icon(root)
     ttk.Label(root, text="Blythe Eye Maker", font=("Segoe UI", 16, "bold")).pack(pady=(24, 8))
     status = tk.StringVar(value="กำลังเตรียมไฟล์ประกอบจาก GitHub…")
     ttk.Label(root, textvariable=status, style="Muted.TLabel").pack(pady=(0, 12))
@@ -1463,12 +1486,7 @@ class BlytheA4App(TkinterDnD.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Blythe Eye Maker")
-        icon_path = app_resource_path("branding", "BlytheEyeMaker.ico")
-        if icon_path.is_file():
-            try:
-                self.iconbitmap(str(icon_path))
-            except tk.TclError:
-                pass
+        apply_app_icon(self)
         self.geometry("760x560")
         self.minsize(680, 500)
         self.configure(bg=UI_BG)
