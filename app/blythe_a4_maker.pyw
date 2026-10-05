@@ -82,7 +82,7 @@ DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -128,7 +128,8 @@ def design_key(group: int, design_id: str) -> str:
 
 def display_design_id(value: str) -> str:
     if value.startswith("custom:"):
-        return f"คัส {value.split(':', 1)[1]}"
+        number = value.split(":", 1)[1]
+        return f"คัส {int(number):02d}" if number.isdigit() else f"คัส {number}"
     return value.split(":", 1)[1] if ":" in value else value
 
 
@@ -393,6 +394,29 @@ def apply_app_icon(window: tk.Misc) -> None:
         window._app_icon_photos = photos  # keep references so Tk does not drop them
     except (OSError, ValueError, tk.TclError):
         pass
+    if sys.platform == "win32":
+        _set_native_window_icons(window, icon_path)
+
+
+def _set_native_window_icons(window: tk.Misc, icon_path: Path) -> None:
+    """Hand Windows the ICO entries at the exact sizes it draws, so the taskbar
+    and title bar never show a stretched Tk-generated icon."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
+        window.update_idletasks()
+        hwnd = int(window.wm_frame(), 16)
+        image_icon, load_from_file, wm_seticon = 1, 0x10, 0x80
+        for which, metric in ((0, 49), (1, 11)):  # ICON_SMALL/SM_CXSMICON, ICON_BIG/SM_CXICON
+            size = user32.GetSystemMetrics(metric)
+            handle = user32.LoadImageW(None, str(icon_path), image_icon, size, size, load_from_file)
+            if handle:
+                user32.SendMessageW(hwnd, wm_seticon, which, handle)
+    except (AttributeError, OSError, ValueError, tk.TclError):
+        pass
 
 
 def ensure_release_assets() -> bool:
@@ -515,6 +539,45 @@ def discover_custom_a4_items(folder: Path) -> OrderedDict[str, tuple[Path, tuple
         for number, files in sorted(pairs.items())
         if 1 in files and 2 in files
     )
+
+
+def delete_and_renumber_custom_a4(
+    items: OrderedDict[str, tuple[Path, tuple[Path, ...]]],
+    remove_id: str,
+) -> tuple[OrderedDict[str, tuple[Path, tuple[Path, ...]]], dict[str, str]]:
+    """Delete one custom pair's files and renumber the rest 1..N without gaps.
+
+    Returns the renumbered items and a map from old ids to new ids.
+    """
+    def number(key: str) -> int:
+        return int(key.split(":", 1)[1])
+
+    for path in items[remove_id][1]:
+        path.unlink(missing_ok=True)
+    remaining = sorted((key for key in items if key != remove_id), key=number)
+
+    renamed: OrderedDict[str, tuple[Path, tuple[Path, ...]]] = OrderedDict()
+    id_map: dict[str, str] = {}
+    staged: list[tuple[Path, Path]] = []
+    for new_number, old_id in enumerate(remaining, start=1):
+        new_id = f"custom:{new_number:03d}"
+        source, paths = items[old_id]
+        new_paths = tuple(
+            path.with_name(f"custom_{new_number:03d}_{index}.png") for index, path in enumerate(paths, start=1)
+        )
+        if new_paths != paths:
+            for path, new_path in zip(paths, new_paths):
+                # Rename through a temporary name so 2 -> 1 never overwrites a file still waiting to move.
+                temporary = path.with_name(f".renumber_{new_number:03d}_{new_path.name}")
+                path.replace(temporary)
+                staged.append((temporary, new_path))
+            if source in paths:
+                source = new_paths[paths.index(source)]
+        renamed[new_id] = (source, new_paths)
+        id_map[old_id] = new_id
+    for temporary, final in staged:
+        temporary.replace(final)
+    return renamed, id_map
 
 
 def four_sheet_sort_key(value: str) -> tuple[int, int, str]:
@@ -3045,8 +3108,18 @@ class BlytheA4App(TkinterDnD.Tk):
         update_button.pack(side="right")
         self._check_latest_version(update_status_var)
 
+        uninstall_row = ttk.Frame(frame)
+        uninstall_row.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Label(uninstall_row, text="ถอนการติดตั้ง", font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(
+            uninstall_row,
+            text="ลบโปรแกรมและไฟล์หลังบ้านทั้งหมด (ไฟล์งานลูกค้าไม่ถูกลบ)",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=8)
+        ttk.Button(uninstall_row, text="ถอนการติดตั้ง", command=lambda: self._uninstall_program(dialog)).pack(side="right")
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
@@ -3080,6 +3153,80 @@ class BlytheA4App(TkinterDnD.Tk):
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
+
+    def _uninstall_targets(self, include_custom_library: bool) -> list[Path]:
+        """Everything the app created: its hidden data folder, prepared caches and the program itself."""
+        targets: list[Path] = [SETTINGS_DIR]
+        source = Path(self.source_var.get()).expanduser()
+        if source.is_dir():
+            cache_roots = [source, *(path for path in source.parent.iterdir() if path.is_dir())]
+            targets += [root / CACHE_DIR_NAME for root in cache_roots if (root / CACHE_DIR_NAME).is_dir()]
+            if include_custom_library and (source / CUSTOM_A4_DIR_NAME).is_dir():
+                targets.append(source / CUSTOM_A4_DIR_NAME)
+        if getattr(sys, "frozen", False):
+            targets.append(Path(sys.executable).resolve())
+        else:
+            app_root = Path(__file__).resolve().parents[1]
+            if (app_root / "เปิดโปรแกรม.bat").is_file() and (app_root / "app" / "blythe_a4_maker.pyw").is_file():
+                targets.append(app_root)
+        return targets
+
+    def _uninstall_program(self, dialog: tk.Toplevel) -> None:
+        if not messagebox.askyesno(
+            "ถอนการติดตั้ง",
+            "ลบโปรแกรม Blythe Eye Maker ออกจากเครื่องแบบหมดจด?\n\n"
+            f"• ไฟล์โปรแกรม\n• การตั้งค่าและไฟล์หลังบ้าน ({SETTINGS_DIR})\n• แคชที่โปรแกรมสร้าง ({CACHE_DIR_NAME})\n\n"
+            "รูปต้นฉบับและไฟล์ A4/4×6 ที่ทำให้ลูกค้าจะไม่ถูกลบ",
+            icon="warning",
+            parent=dialog,
+        ):
+            return
+        include_custom = messagebox.askyesno(
+            "รูปคัสตอม",
+            f"ลบรูปคัสตอมที่บันทึกไว้ ({CUSTOM_A4_DIR_NAME}) ด้วยไหม?\n\nกด No เพื่อเก็บไว้",
+            parent=dialog,
+        )
+        targets = self._uninstall_targets(include_custom)
+        script = (
+            "param([int]$ProcessId, [string]$ListFile)\n"
+            "$Targets = Get-Content -LiteralPath $ListFile -Encoding UTF8 | Where-Object { $_ }\n"
+            "Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
+            "$failed = @()\n"
+            "foreach ($target in $Targets) {\n"
+            "  $deadline = (Get-Date).AddSeconds(60)\n"
+            "  while (Test-Path -LiteralPath $target) {\n"
+            "    try { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }\n"
+            "    catch { if ((Get-Date) -gt $deadline) { $failed += $target; break }; Start-Sleep -Milliseconds 500 }\n"
+            "  }\n"
+            "}\n"
+            "Add-Type -AssemblyName PresentationFramework\n"
+            "if ($failed.Count) {\n"
+            "  [System.Windows.MessageBox]::Show(('ลบไม่ได้บางรายการ:' + [Environment]::NewLine + ($failed -join [Environment]::NewLine)), 'Blythe Eye Maker') | Out-Null\n"
+            "} else {\n"
+            "  [System.Windows.MessageBox]::Show('ถอนการติดตั้ง Blythe Eye Maker เรียบร้อยแล้ว', 'Blythe Eye Maker') | Out-Null\n"
+            "}\n"
+            "Remove-Item -LiteralPath $ListFile, $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+        )
+        uninstaller = Path(tempfile.gettempdir()) / f"blythe_uninstall_{os.getpid()}.ps1"
+        target_list = uninstaller.with_suffix(".txt")
+        try:
+            uninstaller.write_text(script, encoding="utf-8-sig")
+            target_list.write_text("\n".join(str(path) for path in targets), encoding="utf-8")
+            subprocess.Popen(
+                [
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(uninstaller),
+                    "-ProcessId", str(os.getpid()), "-ListFile", str(target_list),
+                ],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                close_fds=True,
+                env=relaunch_environment(),
+                cwd=tempfile.gettempdir(),
+            )
+        except OSError as exc:
+            messagebox.showerror("ถอนการติดตั้งไม่สำเร็จ", str(exc), parent=dialog)
+            return
+        dialog.destroy()
+        self._on_close()
 
     def _check_latest_version(self, status_var: tk.StringVar) -> None:
         """Show the running version and whether GitHub has a newer release."""
@@ -3344,7 +3491,10 @@ class BlytheA4App(TkinterDnD.Tk):
                 command=lambda value=design_id: self.select_and_add(value),
             )
             button.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
-            button.bind("<Button-3>", lambda _event, value=design_id: self.select_and_remove(value))
+            if design_id.startswith("custom:"):
+                button.bind("<Button-3>", lambda event, value=design_id: self._show_custom_a4_menu(event, value))
+            else:
+                button.bind("<Button-3>", lambda _event, value=design_id: self.select_and_remove(value))
             self.number_buttons[design_id] = button
 
         row_cursor = 0
@@ -4098,6 +4248,58 @@ class BlytheA4App(TkinterDnD.Tk):
         self.custom_a4_pan_y = max(-1.0, min(1.0, self.custom_a4_pan_y + (event.y - old_y) / span_y))
         self.custom_a4_pan_last = (event.x, event.y)
         self._render_custom_a4_crop()
+
+    def _show_custom_a4_menu(self, event, design_id: str) -> None:
+        menu = tk.Menu(self, tearoff=False)
+        if self.selections.get(design_id):
+            menu.add_command(label="เอาออกจากรายการ A4 1 คู่", command=lambda: self.select_and_remove(design_id))
+        menu.add_command(
+            label=f"ลบรูป {display_design_id(design_id)} ทิ้ง",
+            command=lambda: self._delete_custom_a4(design_id),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _delete_custom_a4(self, design_id: str) -> None:
+        if not messagebox.askyesno(
+            "ลบรูปคัสตอม",
+            f"ลบ {display_design_id(design_id)} ทิ้งถาวร แล้วเรียงเลขคัสตอมที่เหลือใหม่ตั้งแต่ 01 ใช่ไหม?",
+            parent=self,
+        ):
+            return
+        items = OrderedDict(
+            (key, (self.assets[key], tuple(self.prepared_assets[key])))
+            for key in self.assets
+            if key.startswith("custom:") and key.split(":", 1)[1].isdigit()
+        )
+        if design_id not in items:
+            return
+        try:
+            renamed, id_map = delete_and_renumber_custom_a4(items, design_id)
+        except OSError as exc:
+            messagebox.showerror("ลบรูปไม่ได้", str(exc), parent=self)
+            renamed, id_map = None, {}
+        old_selections = self.selections.copy()
+        old_history = list(self.selection_history)
+        if renamed is not None:
+            self.custom_a4_items = renamed
+            self.custom_a4_counter = len(renamed)
+        self.reload_assets()
+        self.selections = OrderedDict(
+            (id_map.get(key, key), count)
+            for key, count in old_selections.items()
+            if key != design_id and id_map.get(key, key) in self.assets
+        )
+        self.selection_history = [
+            id_map.get(key, key)
+            for key in old_history
+            if key != design_id and id_map.get(key, key) in self.assets
+        ]
+        self.refresh_selection_status()
+        if renamed is not None:
+            self.custom_a4_crop_status.set(f"ลบ {display_design_id(design_id)} แล้ว • เรียงเลขใหม่ 01–{len(renamed):02d}")
 
     def _apply_custom_a4_crop(self, persist: bool, crop: bool | None = None) -> None:
         if self.custom_a4_image is None or self.custom_a4_source_path is None:

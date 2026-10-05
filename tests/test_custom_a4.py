@@ -20,6 +20,27 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_deleting_custom_pair_renumbers_the_rest_without_gaps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            items = OrderedDict()
+            for number in (1, 2, 3):
+                paths = tuple(folder / f"custom_{number:03d}_{index}.png" for index in (1, 2))
+                for index, path in enumerate(paths, start=1):
+                    path.write_text(f"{number}-{index}")
+                items[f"custom:{number:03d}"] = (paths[0], paths)
+
+            renamed, id_map = _app.delete_and_renumber_custom_a4(items, "custom:002")
+
+            self.assertEqual(list(renamed), ["custom:001", "custom:002"])
+            self.assertEqual(id_map, {"custom:001": "custom:001", "custom:003": "custom:002"})
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), [
+                "custom_001_1.png", "custom_001_2.png", "custom_002_1.png", "custom_002_2.png",
+            ])
+            self.assertEqual((folder / "custom_002_2.png").read_text(), "3-2")
+            self.assertEqual(renamed["custom:002"][0], folder / "custom_002_1.png")
+            self.assertEqual(_app.display_design_id("custom:002"), "คัส 02")
+
     def test_version_tuple_compares_numerically(self):
         self.assertGreater(_app.version_tuple("v1.1.10"), _app.version_tuple("1.1.9"))
         self.assertEqual(_app.version_tuple("v1.1.3"), _app.version_tuple("1.1.3"))
