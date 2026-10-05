@@ -20,6 +20,25 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_saved_custom_pair_becomes_next_number_in_set_one(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            Image.new("RGB", (40, 20), "white").save(folder / "63.png")
+            Image.new("RGB", (20, 20), "white").save(folder / "7.1.png")
+            red = Image.new("RGBA", (20, 20), "red")
+            blue = Image.new("RGBA", (20, 20), "blue")
+            self.assertEqual(_app.save_pair_into_set((red, blue), folder), "64")
+            left, right = _app.split_or_duplicate_pair(folder / "64.png")
+            self.assertEqual(left.getpixel((10, 10))[:3], (255, 0, 0))
+            self.assertEqual(right.getpixel((10, 10))[:3], (0, 0, 255))
+
+            library = folder / _app.CUSTOM_A4_DIR_NAME
+            library.mkdir()
+            red.save(library / "custom_001_1.png")
+            blue.save(library / "custom_001_2.png")
+            self.assertEqual(_app.migrate_custom_library(folder), ["65"])
+            self.assertEqual(list(library.iterdir()), [])
+
     def test_deleting_custom_pair_renumbers_the_rest_without_gaps(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
