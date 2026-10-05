@@ -207,8 +207,13 @@ def extract_update_archive(archive_path: Path, work_dir: Path) -> Path:
 
 def download_update_archive(work_dir: Path) -> Path:
     archive_path = work_dir / "latest.zip"
-    headers = {"User-Agent": "Blythe-Eye-Maker-Updater", "Accept": "application/vnd.github+json"}
-    commit_request = urllib.request.Request(APP_UPDATE_API_URL, headers=headers)
+    headers = {
+        "User-Agent": "Blythe-Eye-Maker-Updater",
+        "Accept": "application/vnd.github+json",
+        "Cache-Control": "no-cache",
+    }
+    commit_url = f"{APP_UPDATE_API_URL}?_={int(datetime.now().timestamp() * 1_000_000)}"
+    commit_request = urllib.request.Request(commit_url, headers=headers)
     with urllib.request.urlopen(commit_request, timeout=30) as response:
         commit_sha = json.load(response).get("sha", "")
     if not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
