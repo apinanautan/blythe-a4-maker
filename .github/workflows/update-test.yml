@@ -31,11 +31,17 @@ jobs:
           Copy-Item $built (Join-Path $incoming "BlytheEyeMaker.exe")
           $marker = Join-Path $env:RUNNER_TEMP "relaunched.txt"
           $env:BLYTHE_UPDATE_TEST_MARKER = $marker
+          $trace = Join-Path $env:RUNNER_TEMP "trace.txt"
+          $env:BLYTHE_UPDATE_TEST_TRACE = $trace
           Start-Process -FilePath (Join-Path $install "BlytheEyeMaker.exe") -ArgumentList "--update-test", (Join-Path $incoming "BlytheEyeMaker.exe")
           $deadline = (Get-Date).AddSeconds(180)
           while (-not (Test-Path $marker) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
           $log = Join-Path $env:APPDATA "BlytheA4Maker\update.log"
-          if (Test-Path $log) { Get-Content $log }
+          Write-Host "--- trace"; if (Test-Path $trace) { Get-Content $trace }
+          Write-Host "--- update.log"; if (Test-Path $log) { Get-Content $log }
+          Write-Host "--- install dir"; Get-ChildItem $install | Format-Table Name, Length | Out-String | Write-Host
+          Write-Host "--- updater scripts"; Get-ChildItem $env:TEMP -Filter "blythe_apply_*.ps1" -ErrorAction SilentlyContinue | Out-String | Write-Host
+          Write-Host "--- processes"; Get-Process | Where-Object { $_.Name -match "Blythe|powershell" } | Format-Table Id, Name, StartTime | Out-String | Write-Host
           if (-not (Test-Path $marker)) { throw "The updated EXE did not start again." }
           $content = Get-Content $marker
           Write-Host "Relaunched: $content"

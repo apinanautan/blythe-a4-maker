@@ -5009,10 +5009,23 @@ class BlytheA4App(TkinterDnD.Tk):
 def _run_update_self_test() -> bool:
     """Hooks used only by the Windows update test in CI; return True when handled."""
     if len(sys.argv) == 3 and sys.argv[1] == "--update-test":
-        work_dir = Path(tempfile.mkdtemp(prefix="blythe_update_test_"))
-        staged = work_dir / APP_EXECUTABLE_NAME
-        shutil.copy2(sys.argv[2], staged)
-        launch_exe_updater(os.getpid(), staged, Path(sys.executable).resolve(), work_dir)
+        trace = os.environ.get("BLYTHE_UPDATE_TEST_TRACE")
+
+        def note(message: str) -> None:
+            if trace:
+                with open(trace, "a", encoding="utf-8") as handle:
+                    handle.write(message + "\n")
+
+        note(f"hook start pid={os.getpid()} exe={sys.executable}")
+        try:
+            work_dir = Path(tempfile.mkdtemp(prefix="blythe_update_test_"))
+            staged = work_dir / APP_EXECUTABLE_NAME
+            shutil.copy2(sys.argv[2], staged)
+            note(f"staged {staged}")
+            launch_exe_updater(os.getpid(), staged, Path(sys.executable).resolve(), work_dir)
+            note("updater launched")
+        except Exception as exc:
+            note(f"error {type(exc).__name__}: {exc}")
         return True
     marker = os.environ.get("BLYTHE_UPDATE_TEST_MARKER")
     if marker:
