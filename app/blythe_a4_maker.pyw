@@ -99,11 +99,13 @@ LIBRARY_SET2 = LIBRARY_DIR / "ขายเเบบ2"
 LIBRARY_4X6 = LIBRARY_DIR / "ไฟล์ตา"
 ORDERS_DIR = DEFAULT_DATA_ROOT / "ออเดอร์"
 LIBRARY_COVERS = LIBRARY_DIR / "ปก"
+LIBRARY_CUSTOM = LIBRARY_DIR / "คัสตอม"
+CUSTOM_GROUP = 4  # new eye chips are saved here; set 1 only holds designs for sale
 COVER_FILE_RE = re.compile(r"cover_(\d+)__L(\d+)x(\d+)_R(\d+)x(\d+)_S(\d+)")
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -148,6 +150,8 @@ def design_key(group: int, design_id: str) -> str:
 
 
 def display_design_id(value: str) -> str:
+    if value.startswith("set4:"):
+        return f"คัส {value.split(':', 1)[1]}"
     if value.startswith("custom:"):
         number = value.split(":", 1)[1]
         return f"คัส {int(number):02d}" if number.isdigit() else f"คัส {number}"
@@ -782,6 +786,18 @@ def copy_into_library(old_folders: list[tuple[Path, Path]]) -> int:
                 shutil.copy2(path, new / path.name)
                 copied += 1
     return copied
+
+
+def move_design_to_set(folder: Path, stem: str, destination: Path) -> str:
+    """Move one design into another set as that set's next free number. Returns the new number."""
+    files = design_files(folder, stem)
+    if not files:
+        raise FileNotFoundError(f"ไม่พบไฟล์เบอร์ {stem}")
+    destination.mkdir(parents=True, exist_ok=True)
+    number = str(next_design_number(destination))
+    for path in files:
+        shutil.move(str(path), str(destination / f"{number}{path.suffix}"))
+    return number
 
 
 def design_files(folder: Path, stem: str) -> list[Path]:
@@ -2060,7 +2076,7 @@ class BlytheA4App(TkinterDnD.Tk):
         saved_settings = load_user_settings()
         saved_source = saved_settings.get("source_folder", "").strip()
         saved_source_4x6 = saved_settings.get("source_4x6_folder", "").strip()
-        for folder in (LIBRARY_SET1, LIBRARY_SET2, LIBRARY_4X6):
+        for folder in (LIBRARY_SET1, LIBRARY_SET2, LIBRARY_4X6, LIBRARY_CUSTOM):
             folder.mkdir(parents=True, exist_ok=True)
         if saved_settings.get("library_migrated") != "1":
             # Bring designs over from the folders older versions used (e.g. Dropbox); they stay where they were.
@@ -2299,7 +2315,7 @@ class BlytheA4App(TkinterDnD.Tk):
         self.page_host = ttk.Frame(outer)
         self.page_host.pack(fill="both", expand=True)
         page_specs = (
-            ("crop", "✂ ขอบลูกตา", self._build_crop_page),
+            ("crop", "✂ Eye chip", self._build_crop_page),
             ("a4", "A4", self._build_a4_page),
             ("4x6", "4×6 นิ้ว", self._build_4x6_page),
             ("ai_single", "AI 1 คู่", self._build_ai_single_page),
@@ -2473,8 +2489,8 @@ class BlytheA4App(TkinterDnD.Tk):
         if skipped or any(key.startswith("custom:") for key in self.selection_history):
             messagebox.showinfo(
                 "บันทึกแล้ว",
-                "รูปชั่วคราว (ครอป/AI ที่ยังไม่ได้บันทึกเข้าแบบที่หนึ่ง) เก็บในออเดอร์ไม่ได้\n"
-                "กด บันทึกเข้าแบบที่หนึ่ง ก่อน แล้วค่อยใส่ลงออเดอร์",
+                "รูปชั่วคราว (Eye chip/AI ที่ยังไม่ได้บันทึก) เก็บในออเดอร์ไม่ได้\n"
+                "กด บันทึกเป็นคัสตอม ก่อน แล้วค่อยใส่ลงออเดอร์",
                 parent=self,
             )
 
@@ -2879,7 +2895,7 @@ class BlytheA4App(TkinterDnD.Tk):
         )
         result_row = ttk.Frame(form)
         result_row.pack(fill="x", pady=(6, 0))
-        ttk.Button(result_row, text="เพิ่มเข้า Data แบบที่หนึ่ง", command=self._ai_result_to_data).pack(
+        ttk.Button(result_row, text="บันทึกเป็นคัสตอม", command=self._ai_result_to_data).pack(
             side="left", fill="x", expand=True
         )
         ttk.Button(result_row, text="ส่งเข้ากล่องครอป A4", command=self._ai_result_to_crop).pack(
@@ -3716,6 +3732,7 @@ class BlytheA4App(TkinterDnD.Tk):
         source = Path(self.source_var.get())
         sets = []
         sets.append((2, "แบบที่สอง", second_source_folder(source)))  # always on: designs for sale
+        sets.append((CUSTOM_GROUP, "คัสตอม", LIBRARY_CUSTOM))
         set3_folder = settings.get("set3_folder", "").strip()
         if settings.get("set3_enabled", "0") == "1" and set3_folder:
             sets.append((3, settings.get("set3_name", "").strip() or "แบบเพิ่มเติม", Path(set3_folder)))
@@ -3727,6 +3744,8 @@ class BlytheA4App(TkinterDnD.Tk):
         for group, _title, folder in self._extra_sets():
             if group == 2:
                 folders["a4_set2"] = folder
+            elif group == CUSTOM_GROUP:
+                folders["custom"] = folder
         folders["sheets_4x6"] = Path(self.source_4x6_var.get())
         folders["covers"] = LIBRARY_COVERS
         return folders
@@ -3736,7 +3755,7 @@ class BlytheA4App(TkinterDnD.Tk):
         status_var.set("กำลังนับรูปในเครื่องกับบน GitHub…")
         folders = self._data_sync_folders()
         token = load_user_settings().get("github_token", "")
-        names = {"a4_set1": "แบบที่หนึ่ง", "a4_set2": "แบบที่สอง", "sheets_4x6": "ไฟล์ตา 4×6", "covers": "ปก AI"}
+        names = {"a4_set1": "แบบที่หนึ่ง", "a4_set2": "แบบที่สอง", "sheets_4x6": "ไฟล์ตา 4×6", "covers": "ปก AI", "custom": "คัสตอม"}
 
         def worker() -> None:
             try:
@@ -3875,7 +3894,7 @@ class BlytheA4App(TkinterDnD.Tk):
         library_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
         ttk.Label(
             library_row,
-            text="แบบที่หนึ่ง แบบที่สอง และไฟล์ตา 4×6 เก็บในโปรแกรมและซิงค์กับ GitHub",
+            text="แบบที่หนึ่ง แบบที่สอง คัสตอม และไฟล์ตา 4×6 เก็บในโปรแกรมและซิงค์กับ GitHub",
             style="Muted.TLabel",
         ).pack(side="left")
         ttk.Button(library_row, text="เปิดโฟลเดอร์", command=lambda: open_folder(LIBRARY_DIR)).pack(side="right")
@@ -4379,7 +4398,8 @@ class BlytheA4App(TkinterDnD.Tk):
 
         row_cursor = 0
         # Unsaved crops (session only) follow set 1 instead of having their own section.
-        set_one = group_ids[1] + group_ids[0]
+        set_one = group_ids[1]
+        group_ids[CUSTOM_GROUP] = group_ids.get(CUSTOM_GROUP, []) + group_ids[0]  # unsaved crops sit with customs
         for index, design_id in enumerate(set_one):
             row_offset, col = divmod(index, columns)
             add_design_button(design_id, row_cursor + row_offset, col)
@@ -4953,7 +4973,7 @@ class BlytheA4App(TkinterDnD.Tk):
         side = tk.Frame(panel, bg=UI_SURFACE)
         side.grid(row=0, column=1, sticky="nsew", padx=(16, 0))
         tk.Label(
-            side, text="ครอปรูปตา", font=("Segoe UI", 12, "bold"), fg=UI_ACCENT_DARK, bg=UI_SURFACE
+            side, text="Eye chip", font=("Segoe UI", 12, "bold"), fg=UI_ACCENT_DARK, bg=UI_SURFACE
         ).pack(anchor="w")
         tk.Label(
             side,
@@ -5019,7 +5039,7 @@ class BlytheA4App(TkinterDnD.Tk):
         self.custom_a4_add_4x6_button = ttk.Button(row_two, text="เพิ่มลง 4×6", command=self._custom_a4_to_4x6)
         self.custom_a4_add_4x6_button.pack(side="left", fill="x", expand=True)
         self.custom_a4_save_button = ttk.Button(
-            row_two, text="บันทึกเข้าแบบที่หนึ่ง", command=lambda: self._apply_custom_a4_crop(persist=True)
+            row_two, text="บันทึกเป็นคัสตอม", command=lambda: self._apply_custom_a4_crop(persist=True)
         )
         self.custom_a4_save_button.pack(side="left", fill="x", expand=True, padx=(6, 0))
         tk.Label(
@@ -5276,6 +5296,8 @@ class BlytheA4App(TkinterDnD.Tk):
             menu.add_command(label="ส่งไปหน้าปก", command=lambda: self._send_design_to_cover(design_id))
         menu.add_command(label="ส่งไปหน้า AI เป็นไฟล์แนบ", command=lambda: self._send_design_to_ai(design_id))
         menu.add_separator()
+        if design_id.startswith(f"set{CUSTOM_GROUP}:"):
+            menu.add_command(label="ย้ายเข้าแบบที่หนึ่ง", command=lambda: self._move_custom_to_set_one(design_id))
         if not design_id.startswith("custom:"):
             menu.add_command(label="เปลี่ยนเบอร์", command=lambda: self._renumber_design(design_id))
             menu.add_command(label="เรียงเลขทั้งชุดใหม่ให้ต่อกัน", command=lambda: self._compact_set(design_id))
@@ -5335,9 +5357,9 @@ class BlytheA4App(TkinterDnD.Tk):
             return
         try:
             with Image.open(self.ai_image_path) as opened:
-                number = save_image_into_set(opened, Path(self.source_var.get()))
+                number = save_image_into_set(opened, LIBRARY_CUSTOM)
         except Exception as exc:
-            messagebox.showerror("เพิ่มเข้า Data ไม่ได้", str(exc), parent=self)
+            messagebox.showerror("บันทึกเป็นคัสตอมไม่ได้", str(exc), parent=self)
             return
         old_selections = self.selections.copy()
         old_history = list(self.selection_history)
@@ -5345,7 +5367,28 @@ class BlytheA4App(TkinterDnD.Tk):
         self.selections = OrderedDict((key, count) for key, count in old_selections.items() if key in self.assets)
         self.selection_history = [key for key in old_history if key in self.assets]
         self.refresh_selection_status()
-        self.ai_single_status_var.set(f"เพิ่มเข้า Data แบบที่หนึ่ง เบอร์ {number} แล้ว")
+        self.ai_single_status_var.set(f"บันทึกเป็นคัสตอม เบอร์ {number} แล้ว")
+        self._start_data_sync()
+
+    def _move_custom_to_set_one(self, design_id: str) -> None:
+        path = self.assets.get(design_id)
+        if path is None:
+            return
+        set_one = Path(self.source_var.get())
+        number = next_design_number(set_one)
+        if not messagebox.askyesno(
+            "ย้ายเข้าแบบที่หนึ่ง",
+            f"ย้าย {display_design_id(design_id)} เข้าแบบที่หนึ่ง เป็นเบอร์ {number}?\n\nจะหายจากคัสตอม",
+            parent=self,
+        ):
+            return
+        try:
+            number = move_design_to_set(path.parent, path.stem, set_one)
+        except OSError as exc:
+            messagebox.showerror("ย้ายไม่ได้", str(exc), parent=self)
+            return
+        self._reload_keeping_selection({design_id: design_key(1, number)})
+        self.cache_var.set(f"ย้าย {display_design_id(design_id)} เข้าแบบที่หนึ่ง เบอร์ {number} แล้ว")
         self._start_data_sync()
 
     def _delete_custom_a4(self, design_id: str) -> None:
@@ -5622,8 +5665,8 @@ class BlytheA4App(TkinterDnD.Tk):
             use_crop = self.custom_a4_crop_mode if crop is None else crop
             pair = self._custom_a4_pair(use_crop)
             if persist:
-                number = save_pair_into_set(pair, Path(self.source_var.get()))
-                custom_id = design_key(1, number)
+                number = save_pair_into_set(pair, LIBRARY_CUSTOM)
+                custom_id = design_key(CUSTOM_GROUP, number)
                 old_selections = self.selections.copy()
                 old_history = list(self.selection_history)
                 self.reload_assets()
@@ -5633,7 +5676,7 @@ class BlytheA4App(TkinterDnD.Tk):
                 self.selection_history = [key for key in old_history if key in self.assets]
                 self.refresh_selection_status()
                 self.select_and_add(custom_id)
-                self.custom_a4_crop_status.set(f"บันทึกเป็นแบบที่หนึ่ง เบอร์ {number} แล้ว — เพิ่มลงรายการ A4 แล้ว")
+                self.custom_a4_crop_status.set(f"บันทึกเป็นคัสตอม เบอร์ {number} แล้ว — เพิ่มลงรายการ A4 แล้ว")
                 self._start_data_sync()
                 return
             existing_numbers = [
