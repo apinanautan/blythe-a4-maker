@@ -21,6 +21,27 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_ai_cover_eyes_are_found_and_saved_in_the_name(self):
+        cover = Image.new("RGB", (1000, 1000), (240, 200, 190))
+        draw = ImageDraw.Draw(cover)
+        draw.ellipse((200, 410, 390, 600), fill="white")  # left blank eye, center (295, 505), 190 wide
+        draw.ellipse((650, 410, 840, 600), fill="white")
+        found = _app.detect_blank_eyes(cover, ((287, 502), (748, 503)))
+        self.assertIsNotNone(found)
+        (lx, ly), (rx, ry), size = found
+        self.assertLessEqual(abs(lx - 295), 2)
+        self.assertLessEqual(abs(rx - 745), 2)
+        self.assertLessEqual(abs(ly - 505), 2)
+        self.assertTrue(170 <= size <= 190)
+        self.assertIsNone(_app.detect_blank_eyes(Image.new("RGB", (1000, 1000), "white"), ((287, 502), (748, 503))))
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            _app.save_library_cover(cover, (lx, ly), (rx, ry), size, folder)
+            covers = _app.load_library_covers(folder)
+            self.assertEqual(list(covers), ["ai01"])
+            self.assertEqual(covers["ai01"]["left_center"], (lx, ly))
+            self.assertEqual(covers["ai01"]["eye_size"], size)
+
     def test_compact_numbers_keeps_order_and_pieces_together(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
@@ -61,7 +82,7 @@ class CustomA4Tests(unittest.TestCase):
                 _app.BlytheA4App._extra_sets(fake),
                 [(2, "แบบที่สอง", source.parent / "ขายเเบบ2"), (3, "ของฉัน", Path("/local/mine"))],
             )
-            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "a4_set2", "sheets_4x6"})
+            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "a4_set2", "sheets_4x6", "covers"})
         with unittest.mock.patch.object(_app, "load_user_settings", return_value={"set3_folder": "/local/mine"}):
             self.assertEqual([group for group, _title, _folder in _app.BlytheA4App._extra_sets(fake)], [2])
 

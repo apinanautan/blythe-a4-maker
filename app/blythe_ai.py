@@ -670,3 +670,54 @@ def create_eye_collection_16(
         encoding="utf-8",
     )
     return preset_dir, paths, images
+
+
+COVER_HAIR = [
+    "long wavy pastel pink hair", "short platinum blonde bob with bangs", "honey brown curls",
+    "lavender twin tails", "jet black hime cut", "strawberry blonde braids", "mint green bob",
+    "chestnut hair with a big ribbon", "silver white long straight hair", "copper red waves",
+]
+COVER_OUTFIT = [
+    "a lace bonnet and frilly collar", "a knit beret and cozy sweater", "a flower crown and sundress",
+    "a sailor collar dress", "a velvet headband and vintage blouse", "bunny ear hood",
+    "a straw hat with daisies", "a gothic lolita headdress", "a cute raincoat hood", "a pearl tiara and tulle dress",
+]
+COVER_BACKGROUND = [
+    "soft pastel studio background", "dreamy bokeh garden", "light cream backdrop",
+    "pale blue sky with clouds", "pink floral wallpaper", "warm sunset haze",
+]
+
+
+def cover_prompt(rng=None) -> str:
+    import random as _random
+
+    rng = rng or _random
+    return (
+        "Edit the attached Blythe doll cover as a layout reference. Create a NEW, different Blythe doll "
+        "portrait that keeps EXACTLY the same square 1:1 framing, head size, head position, eye positions and "
+        "eye size as the reference. Change the look completely: "
+        f"{rng.choice(COVER_HAIR)}, wearing {rng.choice(COVER_OUTFIT)}, {rng.choice(COVER_BACKGROUND)}. "
+        "The two large eyes MUST be completely blank: plain clean pure white eyeballs with NO iris, NO pupil, "
+        "NO highlights and NO color inside them, only the eyelids and lashes around them, so eyes can be placed "
+        "in later. Cute, high quality, soft lighting, no text, no watermark."
+    )
+
+
+def create_cover_template(reference_image: Path, output_dir: Path, prompt: str | None = None) -> Path:
+    """Generate a new blank-eyed doll cover from an existing cover used as the layout reference."""
+    namespace = _snapgen_namespace()
+    generate_image = namespace.get("generate_image")
+    encode_image = namespace.get("encode_image_b64")
+    if not callable(generate_image) or not callable(encode_image):
+        raise RuntimeError("SnapGen client has no generate_image() / encode_image_b64()")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = generate_image(
+        prompt or cover_prompt(),
+        output_dir=str(output_dir),
+        name_hint="blythe_cover",
+        aspect_ratio="1:1",
+        save_sidecar=False,
+        is_edit=True,
+        ref_images=[encode_image(str(reference_image))],
+    )
+    return Path(result)
