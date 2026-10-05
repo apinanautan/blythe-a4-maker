@@ -1,0 +1,54 @@
+name: Update test
+
+# Builds the EXE on Windows and runs a real in-place update: the running EXE
+# must be replaced and the new copy must start on its own.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install -r app/requirements.txt pyinstaller
+      - name: Build EXE
+        id: build
+        shell: pwsh
+        run: ./build_release.ps1
+      - name: Update the running EXE in place
+        shell: pwsh
+        run: |
+          $built = Join-Path "${{ steps.build.outputs.release_dir }}" "BlytheEyeMaker.exe"
+          $install = Join-Path $env:RUNNER_TEMP "install"
+          $incoming = Join-Path $env:RUNNER_TEMP "incoming"
+          New-Item -ItemType Directory -Force $install, $incoming | Out-Null
+          Copy-Item $built (Join-Path $install "BlytheEyeMaker.exe")
+          Copy-Item $built (Join-Path $incoming "BlytheEyeMaker.exe")
+          $marker = Join-Path $env:RUNNER_TEMP "relaunched.txt"
+          $env:BLYTHE_UPDATE_TEST_MARKER = $marker
+          $trace = Join-Path $env:RUNNER_TEMP "trace.txt"
+          $env:BLYTHE_UPDATE_TEST_TRACE = $trace
+          Start-Process -FilePath (Join-Path $install "BlytheEyeMaker.exe") -ArgumentList "--update-test", (Join-Path $incoming "BlytheEyeMaker.exe")
+          $deadline = (Get-Date).AddSeconds(180)
+          while (-not (Test-Path $marker) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          $log = Join-Path $env:APPDATA "BlytheA4Maker\update.log"
+          Write-Host "--- trace"; if (Test-Path $trace) { Get-Content $trace }
+          Write-Host "--- update.log"; if (Test-Path $log) { Get-Content $log }
+          Write-Host "--- update_console.log"; $console = Join-Path $env:APPDATA "BlytheA4Maker\update_console.log"; if (Test-Path $console) { Get-Content $console }
+          Write-Host "--- parse check"
+          Get-ChildItem $env:TEMP -Filter "blythe_apply_*.ps1" -ErrorAction SilentlyContinue | ForEach-Object {
+            powershell.exe -NoProfile -Command "`$errors = `$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$($_.FullName)', [ref]`$null, [ref]`$errors); `$errors | ForEach-Object { `$_.ToString() }"
+          }
+          Write-Host "--- install dir"; Get-ChildItem $install | Format-Table Name, Length | Out-String | Write-Host
+          Write-Host "--- updater scripts"; Get-ChildItem $env:TEMP -Filter "blythe_apply_*.ps1" -ErrorAction SilentlyContinue | Out-String | Write-Host
+          Write-Host "--- processes"; Get-Process | Where-Object { $_.Name -match "Blythe|powershell" } | Format-Table Id, Name, StartTime | Out-String | Write-Host
+          if (-not (Test-Path $marker)) { throw "The updated EXE did not start again." }
+          $content = Get-Content $marker
+          Write-Host "Relaunched: $content"
+          if ($content[1] -ne (Resolve-Path (Join-Path $install "BlytheEyeMaker.exe")).Path) { throw "Relaunched from the wrong place." }
+          if (-not (Test-Path (Join-Path $install "BlytheEyeMaker.exe"))) { throw "EXE missing after update." }

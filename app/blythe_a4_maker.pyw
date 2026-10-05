@@ -85,12 +85,13 @@ SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Make
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 DATA_SYNC_STATE_FILE = SETTINGS_DIR / "data_sync_state.json"
 TRASH_DIR = SETTINGS_DIR / "trash"
+UPDATE_LOG_FILE = SETTINGS_DIR / "update.log"
 # Where a fresh install keeps the eye library downloaded from GitHub and the customer output.
 DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.11"
+APP_VERSION = "1.1.12"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -369,6 +370,75 @@ def install_release_assets(archive_path: Path, version: str) -> None:
             backup.replace(APP_RELEASE_ASSETS_DIR)
         shutil.rmtree(stage, ignore_errors=True)
         raise
+
+
+EXE_UPDATER_SCRIPT = r"""
+param([int]$ProcessId, [string]$UpdatedExe, [string]$InstallExe, [string]$WorkDir, [string]$LogFile)
+function Log([string]$message) {
+  try { Add-Content -LiteralPath $LogFile -Value ("{0:s} {1}" -f (Get-Date), $message) -Encoding UTF8 } catch {}
+}
+$old = "$InstallExe.old"
+try {
+  Log "update start pid=$ProcessId new=$UpdatedExe target=$InstallExe"
+  Wait-Process -Id $ProcessId -Timeout 60 -ErrorAction SilentlyContinue
+  Log "old process closed"
+  $deadline = (Get-Date).AddSeconds(60)
+  while ($true) {
+    try {
+      if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
+      # Windows lets a running or locked EXE be renamed, so move it aside instead of overwriting it.
+      if (Test-Path -LiteralPath $InstallExe) { Move-Item -LiteralPath $InstallExe -Destination $old -Force -ErrorAction Stop }
+      Move-Item -LiteralPath $UpdatedExe -Destination $InstallExe -Force -ErrorAction Stop
+      break
+    } catch {
+      Log ("retry: " + $_.Exception.Message)
+      if (-not (Test-Path -LiteralPath $InstallExe) -and (Test-Path -LiteralPath $old)) {
+        Move-Item -LiteralPath $old -Destination $InstallExe -Force -ErrorAction SilentlyContinue
+      }
+      if ((Get-Date) -gt $deadline) { throw }
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  Log "replaced"
+  Start-Process -FilePath $InstallExe -WorkingDirectory (Split-Path -Parent $InstallExe)
+  Log "started new version"
+  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+  Log ("FAILED: " + $_.Exception.Message)
+  # Never leave the user with nothing open: start whichever copy still exists.
+  if (Test-Path -LiteralPath $UpdatedExe) { Start-Process -FilePath $UpdatedExe }
+  elseif (Test-Path -LiteralPath $InstallExe) { Start-Process -FilePath $InstallExe }
+  Add-Type -AssemblyName PresentationFramework
+  [System.Windows.MessageBox]::Show(("อัปเดตไม่สำเร็จ: " + $_.Exception.Message + [Environment]::NewLine + "บันทึก: " + $LogFile), "Blythe Eye Maker") | Out-Null
+}
+"""
+
+
+# PowerShell started with DETACHED_PROCESS exits at once without running its script
+# (verified on Windows in CI); CREATE_NO_WINDOW keeps it hidden and working.
+POWERSHELL_HELPER_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def launch_exe_updater(process_id: int, update_file: Path, install_exe: Path, work_dir: Path) -> None:
+    """Start the PowerShell helper that swaps in the new EXE after this process exits and reopens it."""
+    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    updater = Path(tempfile.gettempdir()) / f"blythe_apply_{process_id}.ps1"
+    updater.write_text(EXE_UPDATER_SCRIPT, encoding="utf-8-sig")
+    # PowerShell's own errors (e.g. a script that will not start) land here instead of vanishing.
+    with UPDATE_LOG_FILE.with_name("update_console.log").open("w", encoding="utf-8") as console:
+        subprocess.Popen(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater),
+                "-ProcessId", str(process_id), "-UpdatedExe", str(update_file), "-InstallExe", str(install_exe),
+                "-WorkDir", str(work_dir), "-LogFile", str(UPDATE_LOG_FILE),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=console,
+            stderr=subprocess.STDOUT,
+            creationflags=POWERSHELL_HELPER_FLAGS,
+            close_fds=True,
+            env=relaunch_environment(),
+        )
 
 
 def download_latest_release_exe(work_dir: Path) -> Path:
@@ -3542,7 +3612,7 @@ class BlytheA4App(TkinterDnD.Tk):
                     "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(uninstaller),
                     "-ProcessId", str(os.getpid()), "-ListFile", str(target_list),
                 ],
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                creationflags=POWERSHELL_HELPER_FLAGS,
                 close_fds=True,
                 env=relaunch_environment(),
                 cwd=tempfile.gettempdir(),
@@ -3648,56 +3718,11 @@ class BlytheA4App(TkinterDnD.Tk):
             return
 
         frozen = getattr(sys, "frozen", False)
-        app_root = Path(sys.executable).resolve().parent if frozen else Path(__file__).resolve().parents[1]
-        launcher = Path(sys.executable).resolve() if frozen else app_root / "เปิดโปรแกรม.bat"
-        updater = Path(tempfile.gettempdir()) / f"blythe_apply_{os.getpid()}.ps1"
-        if frozen:
-            script = (
-                "param([int]$ProcessId, [string]$UpdatedExe, [string]$InstallExe, [string]$WorkDir)\n"
-                "try {\n"
-                "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
-                "  $deadline = (Get-Date).AddSeconds(60)\n"
-                "  while ($true) {\n"
-                "    try { Move-Item -LiteralPath $UpdatedExe -Destination $InstallExe -Force -ErrorAction Stop; break }\n"
-                "    catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Milliseconds 500 }\n"
-                "  }\n"
-                "  Start-Process -FilePath $InstallExe -WorkingDirectory (Split-Path -Parent $InstallExe)\n"
-                "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
-                "} catch {\n"
-                "  Add-Type -AssemblyName PresentationFramework\n"
-                "  [System.Windows.MessageBox]::Show(('อัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
-                "}\n"
-            )
-            args = [
-                "-ProcessId", str(os.getpid()), "-UpdatedExe", str(update_file),
-                "-InstallExe", str(launcher), "-WorkDir", str(work_dir),
-            ]
-        else:
-            script = (
-                "param([int]$ProcessId, [string]$StageRoot, [string]$InstallRoot, [string]$WorkDir, [string]$Launcher)\n"
-                "try {\n"
-                "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
-                "  Start-Sleep -Milliseconds 500\n"
-                "  Get-ChildItem -LiteralPath $StageRoot -Force | Copy-Item -Destination $InstallRoot -Recurse -Force\n"
-                "  Start-Process -FilePath $Launcher -WorkingDirectory $InstallRoot\n"
-                "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
-                "} catch {\n"
-                "  Add-Type -AssemblyName PresentationFramework\n"
-                "  [System.Windows.MessageBox]::Show(('ติดตั้งอัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
-                "}\n"
-            )
-            args = [
-                "-ProcessId", str(os.getpid()), "-StageRoot", str(source_dir),
-                "-InstallRoot", str(app_root), "-WorkDir", str(work_dir), "-Launcher", str(launcher),
-            ]
-        updater.write_text(script, encoding="utf-8-sig")
         try:
-            subprocess.Popen(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater), *args],
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-                close_fds=True,
-                env=relaunch_environment(),
-            )
+            if frozen:
+                launch_exe_updater(os.getpid(), update_file, Path(sys.executable).resolve(), work_dir)
+            else:
+                self._launch_source_updater(source_dir, work_dir)
         except OSError as exc:
             shutil.rmtree(work_dir, ignore_errors=True)
             status_var.set("เริ่มตัวติดตั้งอัปเดตไม่ได้")
@@ -3706,6 +3731,35 @@ class BlytheA4App(TkinterDnD.Tk):
             return
         dialog.destroy()
         self.destroy()
+
+    def _launch_source_updater(self, source_dir: Path, work_dir: Path) -> None:
+        app_root = Path(__file__).resolve().parents[1]
+        launcher = app_root / "เปิดโปรแกรม.bat"
+        updater = Path(tempfile.gettempdir()) / f"blythe_apply_{os.getpid()}.ps1"
+        script = (
+            "param([int]$ProcessId, [string]$StageRoot, [string]$InstallRoot, [string]$WorkDir, [string]$Launcher)\n"
+            "try {\n"
+            "  Wait-Process -Id $ProcessId -Timeout 60 -ErrorAction SilentlyContinue\n"
+            "  Start-Sleep -Milliseconds 500\n"
+            "  Get-ChildItem -LiteralPath $StageRoot -Force | Copy-Item -Destination $InstallRoot -Recurse -Force\n"
+            "  Start-Process -FilePath $Launcher -WorkingDirectory $InstallRoot\n"
+            "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "} catch {\n"
+            "  Add-Type -AssemblyName PresentationFramework\n"
+            "  [System.Windows.MessageBox]::Show(('ติดตั้งอัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
+            "}\n"
+        )
+        updater.write_text(script, encoding="utf-8-sig")
+        subprocess.Popen(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater),
+                "-ProcessId", str(os.getpid()), "-StageRoot", str(source_dir),
+                "-InstallRoot", str(app_root), "-WorkDir", str(work_dir), "-Launcher", str(launcher),
+            ],
+            creationflags=POWERSHELL_HELPER_FLAGS,
+            close_fds=True,
+            env=relaunch_environment(),
+        )
 
     def _start_new_ai_history(self, status_var: tk.StringVar) -> None:
         if str(self.ai_generate_button["state"]) == "disabled":
@@ -4962,7 +5016,42 @@ class BlytheA4App(TkinterDnD.Tk):
         )
 
 
+def _run_update_self_test() -> bool:
+    """Hooks used only by the Windows update test in CI; return True when handled."""
+    if len(sys.argv) == 3 and sys.argv[1] == "--update-test":
+        trace = os.environ.get("BLYTHE_UPDATE_TEST_TRACE")
+
+        def note(message: str) -> None:
+            if trace:
+                with open(trace, "a", encoding="utf-8") as handle:
+                    handle.write(message + "\n")
+
+        note(f"hook start pid={os.getpid()} exe={sys.executable}")
+        try:
+            work_dir = Path(tempfile.mkdtemp(prefix="blythe_update_test_"))
+            staged = work_dir / APP_EXECUTABLE_NAME
+            shutil.copy2(sys.argv[2], staged)
+            note(f"staged {staged}")
+            launch_exe_updater(os.getpid(), staged, Path(sys.executable).resolve(), work_dir)
+            note("updater launched")
+        except Exception as exc:
+            note(f"error {type(exc).__name__}: {exc}")
+        return True
+    marker = os.environ.get("BLYTHE_UPDATE_TEST_MARKER")
+    if marker:
+        Path(marker).write_text(f"{APP_VERSION}\n{Path(sys.executable).resolve()}", encoding="utf-8")
+        return True
+    return False
+
+
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False):
+        try:
+            Path(f"{Path(sys.executable).resolve()}.old").unlink(missing_ok=True)  # left by the last update
+        except OSError:
+            pass
+    if _run_update_self_test():
+        sys.exit(0)
     if ensure_release_assets():
         app = BlytheA4App()
         app.mainloop()
