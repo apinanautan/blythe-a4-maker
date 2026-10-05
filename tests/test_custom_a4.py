@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from collections import OrderedDict
 from pathlib import Path
@@ -19,6 +20,23 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_version_tuple_compares_numerically(self):
+        self.assertGreater(_app.version_tuple("v1.1.10"), _app.version_tuple("1.1.9"))
+        self.assertEqual(_app.version_tuple("v1.1.3"), _app.version_tuple("1.1.3"))
+
+    def test_relaunch_environment_drops_pyinstaller_state(self):
+        fake_env = {
+            "PATH": "C:\\Windows",
+            "_PYI_APPLICATION_HOME_DIR": "C:\\Temp\\_MEI123",
+            "_PYI_PARENT_PROCESS_LEVEL": "1",
+            "_MEIPASS2": "C:\\Temp\\_MEI123",
+            "TCL_LIBRARY": "C:\\Temp\\_MEI123\\_tcl_data",
+            "TK_LIBRARY": "C:\\Temp\\_MEI123\\_tk_data",
+        }
+        with unittest.mock.patch.dict(_app.os.environ, fake_env, clear=True):
+            env = _app.relaunch_environment()
+        self.assertEqual(env, {"PATH": "C:\\Windows", "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+
     def test_white_background_is_detected_for_automatic_transparency(self):
         self.assertTrue(_app._has_white_background(Image.new("RGB", (32, 32), "white")))
         self.assertFalse(_app._has_white_background(Image.new("RGB", (32, 32), "#335577")))

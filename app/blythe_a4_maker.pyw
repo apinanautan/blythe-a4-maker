@@ -82,7 +82,7 @@ DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -259,6 +259,27 @@ def github_release_info(version: str | None = None) -> dict:
     if not isinstance(release, dict) or not release.get("tag_name") or not isinstance(release.get("assets"), list):
         raise ValueError("GitHub ไม่ได้ส่งข้อมูลรีลีสที่ถูกต้อง")
     return release
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    """Turn "v1.2.3" into (1, 2, 3) so versions compare numerically."""
+    return tuple(int(part) for part in re.findall(r"\d+", version)[:3]) or (0,)
+
+
+def relaunch_environment() -> dict[str, str]:
+    """Environment for starting a fresh copy of the app after an update.
+
+    A PyInstaller one-file EXE sets _PYI_* and Tcl/Tk variables that point at its
+    own temporary folder. If the relaunched EXE inherits them it treats itself as
+    a child of the old process, looks for that deleted folder and exits silently.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("_PYI_") and key not in {"_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"}
+    }
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
 
 
 def download_release_asset(release: dict, asset_name: str, destination: Path) -> Path:
@@ -1488,7 +1509,7 @@ def parse_quick_numbers(text: str) -> list[str]:
 class BlytheA4App(TkinterDnD.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Blythe Eye Maker")
+        self.title(f"Blythe Eye Maker v{APP_VERSION}")
         apply_app_icon(self)
         self.geometry("760x560")
         self.minsize(680, 500)
@@ -3013,7 +3034,7 @@ class BlytheA4App(TkinterDnD.Tk):
 
         update_row = ttk.Frame(frame)
         update_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
-        update_status_var = tk.StringVar(value="ดาวน์โหลดเวอร์ชันล่าสุดจาก GitHub ได้จากปุ่มนี้")
+        update_status_var = tk.StringVar(value=f"เวอร์ชันนี้ v{APP_VERSION} • กำลังเช็กเวอร์ชันล่าสุด…")
         ttk.Label(update_row, text="อัปเดตโปรแกรม", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(update_row, textvariable=update_status_var, style="Muted.TLabel").pack(side="left", padx=8)
         update_button = ttk.Button(
@@ -3022,6 +3043,7 @@ class BlytheA4App(TkinterDnD.Tk):
             command=lambda: self._update_program_from_github(dialog, update_status_var, update_button),
         )
         update_button.pack(side="right")
+        self._check_latest_version(update_status_var)
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(14, 0))
@@ -3058,6 +3080,26 @@ class BlytheA4App(TkinterDnD.Tk):
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
+
+    def _check_latest_version(self, status_var: tk.StringVar) -> None:
+        """Show the running version and whether GitHub has a newer release."""
+
+        def check() -> None:
+            try:
+                latest = str(github_release_info()["tag_name"])
+            except Exception:
+                message = f"เวอร์ชันนี้ v{APP_VERSION} • เช็กเวอร์ชันล่าสุดไม่ได้ (ไม่มีเน็ต?)"
+            else:
+                if version_tuple(latest) > version_tuple(APP_VERSION):
+                    message = f"เวอร์ชันนี้ v{APP_VERSION} • มีเวอร์ชันใหม่ {latest} กดอัปเดตได้เลย"
+                else:
+                    message = f"เวอร์ชันนี้ v{APP_VERSION} • เป็นเวอร์ชันล่าสุดแล้ว ✓"
+            try:
+                self.after(0, lambda: status_var.set(message))
+            except (RuntimeError, tk.TclError):
+                pass
+
+        threading.Thread(target=check, name="blythe-version-check", daemon=True).start()
 
     def _update_program_from_github(
         self,
@@ -3142,8 +3184,11 @@ class BlytheA4App(TkinterDnD.Tk):
                 "param([int]$ProcessId, [string]$UpdatedExe, [string]$InstallExe, [string]$WorkDir)\n"
                 "try {\n"
                 "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
-                "  Start-Sleep -Milliseconds 500\n"
-                "  Move-Item -LiteralPath $UpdatedExe -Destination $InstallExe -Force\n"
+                "  $deadline = (Get-Date).AddSeconds(60)\n"
+                "  while ($true) {\n"
+                "    try { Move-Item -LiteralPath $UpdatedExe -Destination $InstallExe -Force -ErrorAction Stop; break }\n"
+                "    catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Milliseconds 500 }\n"
+                "  }\n"
                 "  Start-Process -FilePath $InstallExe -WorkingDirectory (Split-Path -Parent $InstallExe)\n"
                 "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
                 "} catch {\n"
@@ -3179,6 +3224,7 @@ class BlytheA4App(TkinterDnD.Tk):
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater), *args],
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
                 close_fds=True,
+                env=relaunch_environment(),
             )
         except OSError as exc:
             shutil.rmtree(work_dir, ignore_errors=True)
