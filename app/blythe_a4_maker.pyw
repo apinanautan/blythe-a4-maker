@@ -419,16 +419,21 @@ def launch_exe_updater(process_id: int, update_file: Path, install_exe: Path, wo
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
     updater = Path(tempfile.gettempdir()) / f"blythe_apply_{process_id}.ps1"
     updater.write_text(EXE_UPDATER_SCRIPT, encoding="utf-8-sig")
-    subprocess.Popen(
-        [
-            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater),
-            "-ProcessId", str(process_id), "-UpdatedExe", str(update_file), "-InstallExe", str(install_exe),
-            "-WorkDir", str(work_dir), "-LogFile", str(UPDATE_LOG_FILE),
-        ],
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-        close_fds=True,
-        env=relaunch_environment(),
-    )
+    # PowerShell's own errors (e.g. a script that will not start) land here instead of vanishing.
+    with UPDATE_LOG_FILE.with_name("update_console.log").open("w", encoding="utf-8") as console:
+        subprocess.Popen(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater),
+                "-ProcessId", str(process_id), "-UpdatedExe", str(update_file), "-InstallExe", str(install_exe),
+                "-WorkDir", str(work_dir), "-LogFile", str(UPDATE_LOG_FILE),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=console,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            close_fds=True,
+            env=relaunch_environment(),
+        )
 
 
 def download_latest_release_exe(work_dir: Path) -> Path:
