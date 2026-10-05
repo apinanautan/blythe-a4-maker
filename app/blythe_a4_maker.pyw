@@ -91,7 +91,7 @@ DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.12"
+APP_VERSION = "1.1.13"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -3237,13 +3237,26 @@ class BlytheA4App(TkinterDnD.Tk):
         )
         save_user_settings(settings)
 
-    def _data_sync_folders(self) -> dict[str, Path]:
+    def _extra_sets(self) -> list[tuple[int, str, Path]]:
+        """Enabled sets besides set 1 as (group, title, folder). Turned-off sets never show anywhere."""
+        settings = load_user_settings()
         source = Path(self.source_var.get())
-        return {
-            "a4_set1": source,
-            "a4_set2": second_source_folder(source),
-            "sheets_4x6": Path(self.source_4x6_var.get()),
-        }
+        sets = []
+        if settings.get("set2_enabled", "1") == "1":
+            sets.append((2, "แบบที่สอง", Path(settings.get("set2_folder") or second_source_folder(source))))
+        set3_folder = settings.get("set3_folder", "").strip()
+        if settings.get("set3_enabled", "0") == "1" and set3_folder:
+            sets.append((3, settings.get("set3_name", "").strip() or "แบบเพิ่มเติม", Path(set3_folder)))
+        return sets
+
+    def _data_sync_folders(self) -> dict[str, Path]:
+        # Set 3 is a local-only folder, so it is never synced.
+        folders = {"a4_set1": Path(self.source_var.get())}
+        for group, _title, folder in self._extra_sets():
+            if group == 2:
+                folders["a4_set2"] = folder
+        folders["sheets_4x6"] = Path(self.source_4x6_var.get())
+        return folders
 
     def _compare_data_sync(self, status_var: tk.StringVar) -> None:
         """Show how many images this computer and GitHub each have, and whether they match."""
@@ -3380,10 +3393,18 @@ class BlytheA4App(TkinterDnD.Tk):
         )
         ttk.Label(
             frame,
-            text="โปรแกรมจะอ่านโฟลเดอร์ขายแบบ2 ที่อยู่ข้างกันให้อัตโนมัติ",
+            text="แบบที่หนึ่งเปิดตลอด (รูปที่บันทึกใหม่จะเข้าที่นี่)",
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 5))
         ttk.Entry(frame, textvariable=a4_var, width=54).grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        saved = load_user_settings()
+        set2_var = tk.StringVar(
+            value=saved.get("set2_folder") or str(second_source_folder(Path(self.source_var.get())))
+        )
+        set2_on = tk.BooleanVar(value=saved.get("set2_enabled", "1") == "1")
+        set3_var = tk.StringVar(value=saved.get("set3_folder", ""))
+        set3_name_var = tk.StringVar(value=saved.get("set3_name", "") or "แบบเพิ่มเติม")
+        set3_on = tk.BooleanVar(value=saved.get("set3_enabled", "0") == "1")
 
         def browse_into(target: tk.StringVar, title: str) -> None:
             current = Path(target.get()) if target.get() else Path.home()
@@ -3398,21 +3419,68 @@ class BlytheA4App(TkinterDnD.Tk):
             command=lambda: browse_into(a4_var, "เลือกโฟลเดอร์ Source A4"),
         ).grid(row=2, column=1, padx=(6, 0), pady=(0, 10))
 
+        sets_frame = ttk.Frame(frame)
+        sets_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        sets_frame.columnconfigure(1, weight=1)
+
+        def set_row(row: int, title_widget, path_var: tk.StringVar, enabled: tk.BooleanVar, browse_title: str, note: str) -> None:
+            title_widget.grid(row=row, column=0, sticky="w", padx=(0, 6))
+            entry = ttk.Entry(sets_frame, textvariable=path_var, width=38)
+            entry.grid(row=row, column=1, sticky="ew")
+            browse = ttk.Button(sets_frame, text="เลือก...", command=lambda: browse_into(path_var, browse_title))
+            browse.grid(row=row, column=2, padx=(6, 0))
+            toggle = ttk.Button(sets_frame, width=8)
+            toggle.grid(row=row, column=3, padx=(6, 0))
+            hint = ttk.Label(sets_frame, text=note, style="Muted.TLabel")
+            hint.grid(row=row + 1, column=1, columnspan=3, sticky="w", pady=(0, 6))
+
+            def refresh() -> None:
+                on = enabled.get()
+                state = "normal" if on else "disabled"
+                entry.configure(state=state)
+                browse.configure(state=state)
+                toggle.configure(text="✕ ปิด" if on else "＋ เปิด")
+                hint.configure(text=note if on else "ปิดอยู่ • จะไม่แสดงในโปรแกรม")
+
+            def flip() -> None:
+                enabled.set(not enabled.get())
+                refresh()
+
+            toggle.configure(command=flip)
+            refresh()
+
+        set_row(
+            0,
+            ttk.Label(sets_frame, text="แบบที่สอง", font=("Segoe UI", 10, "bold")),
+            set2_var,
+            set2_on,
+            "เลือกโฟลเดอร์แบบที่สอง",
+            "ซิงค์กับ GitHub",
+        )
+        set_row(
+            2,
+            ttk.Entry(sets_frame, textvariable=set3_name_var, width=14),
+            set3_var,
+            set3_on,
+            "เลือกโฟลเดอร์ในเครื่อง",
+            "โฟลเดอร์ในเครื่อง • ตั้งชื่อหัวข้อได้ทางซ้าย • ไม่ซิงค์ขึ้น GitHub",
+        )
+
         ttk.Label(frame, text="Source 4×6  •  ไฟล์ตา", font=("Segoe UI", 10, "bold")).grid(
-            row=3, column=0, columnspan=2, sticky="w"
+            row=4, column=0, columnspan=2, sticky="w"
         )
         ttk.Label(frame, text="โฟลเดอร์ไฟล์ตา 1800×1200 สำหรับหน้าคัสตอม", style="Muted.TLabel").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(2, 6)
+            row=5, column=0, columnspan=2, sticky="w", pady=(2, 6)
         )
-        ttk.Entry(frame, textvariable=six_var, width=54).grid(row=5, column=0, sticky="ew")
+        ttk.Entry(frame, textvariable=six_var, width=54).grid(row=6, column=0, sticky="ew")
         ttk.Button(
             frame,
             text="เลือก...",
             command=lambda: browse_into(six_var, "เลือกโฟลเดอร์ Source 4×6"),
-        ).grid(row=5, column=1, padx=(6, 0))
+        ).grid(row=6, column=1, padx=(6, 0))
 
         history_row = ttk.Frame(frame)
-        history_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        history_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         history_status_var = tk.StringVar(value="ไม่กดปุ่มนี้: AI 1 คู่จะทำต่อในประวัติเดิม")
         ttk.Button(
             history_row,
@@ -3426,7 +3494,7 @@ class BlytheA4App(TkinterDnD.Tk):
         ).pack(side="left", padx=8)
 
         update_row = ttk.Frame(frame)
-        update_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        update_row.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         update_status_var = tk.StringVar(value=f"เวอร์ชันนี้ v{APP_VERSION} • กำลังเช็กเวอร์ชันล่าสุด…")
         ttk.Label(update_row, text="อัปเดตโปรแกรม", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(update_row, textvariable=update_status_var, style="Muted.TLabel").pack(side="left", padx=8)
@@ -3439,7 +3507,7 @@ class BlytheA4App(TkinterDnD.Tk):
         self._check_latest_version(update_status_var)
 
         sync_row = ttk.Frame(frame)
-        sync_row.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        sync_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         ttk.Label(sync_row, text="ซิงค์ลายตากับ GitHub", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(sync_row, textvariable=self.sync_status_var, style="Muted.TLabel").pack(side="left", padx=8)
         token_var = tk.StringVar(value=load_user_settings().get("github_token", ""))
@@ -3462,7 +3530,7 @@ class BlytheA4App(TkinterDnD.Tk):
         )
         compare_var = tk.StringVar(value="กำลังนับรูปในเครื่องกับบน GitHub…")
         compare_row = ttk.Frame(frame)
-        compare_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        compare_row.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Label(compare_row, textvariable=compare_var, style="Muted.TLabel", justify="left").pack(side="left")
         ttk.Button(compare_row, text="ตรวจอีกครั้ง", command=lambda: self._compare_data_sync(compare_var)).pack(
             side="right", anchor="n"
@@ -3470,13 +3538,13 @@ class BlytheA4App(TkinterDnD.Tk):
         self._compare_data_sync(compare_var)
 
         token_row = ttk.Frame(frame)
-        token_row.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        token_row.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Label(token_row, text="GitHub token (ใช้ตอนอัปรูปขึ้น)", style="Muted.TLabel").pack(side="left")
         ttk.Entry(token_row, textvariable=token_var, width=30, show="•").pack(side="left", padx=6)
         ttk.Button(token_row, text="วิธีสร้าง token", command=lambda: self._show_token_help(dialog)).pack(side="right")
 
         trash_row = ttk.Frame(frame)
-        trash_row.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        trash_row.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Label(trash_row, text="ถังขยะ", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(
             trash_row,
@@ -3486,7 +3554,7 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(trash_row, text="เปิดถังขยะ", command=lambda: self._open_trash(dialog)).pack(side="right")
 
         uninstall_row = ttk.Frame(frame)
-        uninstall_row.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        uninstall_row.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Label(uninstall_row, text="ถอนการติดตั้ง", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(
             uninstall_row,
@@ -3496,7 +3564,7 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(uninstall_row, text="ถอนการติดตั้ง", command=lambda: self._uninstall_program(dialog)).pack(side="right")
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        buttons.grid(row=14, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
@@ -3510,6 +3578,27 @@ class BlytheA4App(TkinterDnD.Tk):
             if not six_value or not six_folder.is_dir():
                 messagebox.showwarning("ไม่พบโฟลเดอร์", "Source 4×6 ไม่ถูกต้อง", parent=dialog)
                 return
+            set3_value = set3_var.get().strip()
+            if set3_on.get() and (not set3_value or not Path(set3_value).expanduser().is_dir()):
+                messagebox.showwarning("ไม่พบโฟลเดอร์", f"โฟลเดอร์ของ {set3_name_var.get().strip() or 'แบบเพิ่มเติม'} ไม่ถูกต้อง", parent=dialog)
+                return
+            set2_value = set2_var.get().strip()
+            if set2_value and Path(set2_value).expanduser().resolve() == second_source_folder(a4_folder.resolve()).resolve():
+                set2_value = ""  # the default folder beside set 1 follows set 1 if it moves
+            settings = load_user_settings()
+            settings.update(
+                {
+                    "set2_folder": str(Path(set2_value).expanduser().resolve()) if set2_value else "",
+                    "set2_enabled": "1" if set2_on.get() else "0",
+                    "set3_folder": str(Path(set3_value).expanduser().resolve()) if set3_value else "",
+                    "set3_name": set3_name_var.get().strip(),
+                    "set3_enabled": "1" if set3_on.get() else "0",
+                }
+            )
+            try:
+                save_user_settings(settings)
+            except OSError as exc:
+                messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc), parent=dialog)
 
             self.source_var.set(str(a4_folder.resolve()))
             self.source_4x6_var.set(str(six_folder.resolve()))
@@ -3771,43 +3860,34 @@ class BlytheA4App(TkinterDnD.Tk):
 
     def reload_assets(self) -> None:
         folder = Path(self.source_var.get())
-        folder2 = second_source_folder(folder)
         if folder.is_dir():
             try:
                 migrate_custom_library(folder)
             except (OSError, ValueError):
                 pass
 
-        source_assets_1 = discover_assets(folder)
-        prepared_1, stats_1 = prepare_asset_cache(source_assets_1, folder)
-
-        source_assets_2 = discover_assets(folder2)
-        if source_assets_2:
-            prepared_2, stats_2 = prepare_asset_cache(source_assets_2, folder2)
-        else:
-            prepared_2 = OrderedDict()
-            stats_2 = {"reused": [], "rebuilt": [], "failed": {}}
-
-        ids_1 = [
-            design_id
-            for design_id in visible_design_ids(source_assets_1)
-            if design_id in prepared_1
-        ]
-        ids_2 = [
-            design_id
-            for design_id in visible_design_ids(source_assets_2)
-            if design_id in prepared_2
-        ]
-
+        sets = [(1, "แบบที่หนึ่ง", folder), *self._extra_sets()]
+        self.set_titles = {group: title for group, title, _folder in sets}
         self.assets = OrderedDict()
         self.prepared_assets = OrderedDict()
         self.design_ids = []
-        group_ids: dict[int, list[str]] = {1: [], 2: [], 3: []}
-        for group, source_assets, prepared, raw_ids in (
-            (1, source_assets_1, prepared_1, ids_1),
-            (2, source_assets_2, prepared_2, ids_2),
-        ):
-            for raw_id in raw_ids:
+        # Group 0 holds unsaved crops, shown after set 1.
+        group_ids: dict[int, list[str]] = {0: [], **{group: [] for group, _title, _folder in sets}}
+        reused: list[str] = []
+        rebuilt: list[str] = []
+        failed: dict[str, str] = {}
+        for group, _title, set_folder in sets:
+            source_assets = discover_assets(set_folder)
+            if not source_assets:
+                continue
+            prepared, stats = prepare_asset_cache(source_assets, set_folder)
+            reused += list(stats.get("reused", []))
+            rebuilt += list(stats.get("rebuilt", []))
+            prefix = "" if group == 1 else f"แบบ{group}:"
+            failed.update({f"{prefix}{key}": value for key, value in dict(stats.get("failed", {})).items()})
+            for raw_id in visible_design_ids(source_assets):
+                if raw_id not in prepared:
+                    continue
                 key = design_key(group, raw_id)
                 self.assets[key] = source_assets[raw_id]
                 self.prepared_assets[key] = prepared[raw_id]
@@ -3819,16 +3899,9 @@ class BlytheA4App(TkinterDnD.Tk):
         for custom_id, (source_path, chip_paths) in custom_items.items():
             self.assets[custom_id] = source_path
             self.prepared_assets[custom_id] = chip_paths
-            group_ids[3].append(custom_id)
+            group_ids[0].append(custom_id)
 
-        self.cache_stats = {
-            "reused": list(stats_1.get("reused", [])) + list(stats_2.get("reused", [])),
-            "rebuilt": list(stats_1.get("rebuilt", [])) + list(stats_2.get("rebuilt", [])),
-            "failed": {
-                **dict(stats_1.get("failed", {})),
-                **{f"แบบ2:{key}": value for key, value in dict(stats_2.get("failed", {})).items()},
-            },
-        }
+        self.cache_stats = {"reused": reused, "rebuilt": rebuilt, "failed": failed}
 
         self.selections.clear()
         self.selection_history.clear()
@@ -3882,7 +3955,7 @@ class BlytheA4App(TkinterDnD.Tk):
         self._build_custom_a4_crop_panel(0)
         row_cursor = 1
         # Unsaved crops (session only) follow set 1 instead of having their own section.
-        set_one = group_ids[1] + group_ids[3]
+        set_one = group_ids[1] + group_ids[0]
         for index, design_id in enumerate(set_one):
             row_offset, col = divmod(index, columns)
             add_design_button(design_id, row_cursor + row_offset, col)
@@ -3890,10 +3963,12 @@ class BlytheA4App(TkinterDnD.Tk):
         if set_one:
             row_cursor += (len(set_one) + columns - 1) // columns
 
-        if group_ids[2]:
+        for group in (group for group in group_ids if group > 1):
+            if not group_ids[group]:
+                continue
             ttk.Label(
                 self.number_grid,
-                text="แบบที่สอง",
+                text=self.set_titles[group],
                 font=("Segoe UI", 11, "bold"),
                 foreground=UI_ACCENT_DARK,
             ).grid(
@@ -3905,10 +3980,10 @@ class BlytheA4App(TkinterDnD.Tk):
                 pady=(12, 6),
             )
             row_cursor += 1
-            for index, design_id in enumerate(group_ids[2]):
+            for index, design_id in enumerate(group_ids[group]):
                 row_offset, col = divmod(index, columns)
                 add_design_button(design_id, row_cursor + row_offset, col)
-            row_cursor += (len(group_ids[2]) + columns - 1) // columns
+            row_cursor += (len(group_ids[group]) + columns - 1) // columns
 
         for col in range(columns):
             self.number_grid.columnconfigure(col, weight=1)
@@ -3919,7 +3994,7 @@ class BlytheA4App(TkinterDnD.Tk):
         rebuilt = len(self.cache_stats.get("rebuilt", []))
         failed = len(self.cache_stats.get("failed", {}))
         cache_text = f"พร้อม {len(self.design_ids)} • เดิม {reused} • ทำใหม่ {rebuilt}"
-        custom_count = len(group_ids[3])
+        custom_count = len(group_ids[0])
         if custom_count:
             cache_text += f" • คัสตอม {custom_count}"
         if failed:
@@ -3974,10 +4049,12 @@ class BlytheA4App(TkinterDnD.Tk):
         if group_ids[1]:
             row_cursor += (len(group_ids[1]) + columns - 1) // columns
 
-        if group_ids[2]:
+        for group in (group for group in group_ids if group > 1):
+            if not group_ids[group]:
+                continue
             ttk.Label(
                 self.cover_number_grid,
-                text="แบบที่สอง",
+                text=self.set_titles[group],
                 font=("Segoe UI", 11, "bold"),
                 foreground=UI_ACCENT_DARK,
             ).grid(
@@ -3989,9 +4066,10 @@ class BlytheA4App(TkinterDnD.Tk):
                 pady=(12, 6),
             )
             row_cursor += 1
-            for index, design_id in enumerate(group_ids[2]):
+            for index, design_id in enumerate(group_ids[group]):
                 row_offset, col = divmod(index, columns)
                 add_button(design_id, row_cursor + row_offset, col)
+            row_cursor += (len(group_ids[group]) + columns - 1) // columns
 
         for col in range(columns):
             self.cover_number_grid.columnconfigure(col, weight=1)
@@ -4799,7 +4877,7 @@ class BlytheA4App(TkinterDnD.Tk):
         listbox = tk.Listbox(frame, width=58, height=12, activestyle="none")
         listbox.pack(fill="both", expand=True, pady=6)
         source = Path(self.source_var.get())
-        names = {str(source): "แบบที่หนึ่ง", str(second_source_folder(source)): "แบบที่สอง"}
+        names = {str(source): "แบบที่หนึ่ง", **{str(folder): title for _group, title, folder in self._extra_sets()}}
         entries: list[dict] = []
 
         def refresh() -> None:

@@ -20,6 +20,27 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_turned_off_sets_are_hidden_and_set_three_is_not_synced(self):
+        from types import SimpleNamespace
+
+        source = Path("/data/ขายเเบบ1")
+        fake = SimpleNamespace(
+            source_var=SimpleNamespace(get=lambda: str(source)),
+            source_4x6_var=SimpleNamespace(get=lambda: "/data/ไฟล์ตา"),
+        )
+        fake._extra_sets = lambda: _app.BlytheA4App._extra_sets(fake)
+        settings = {"set3_enabled": "1", "set3_folder": "/local/mine", "set3_name": "ของฉัน"}
+        with unittest.mock.patch.object(_app, "load_user_settings", return_value=settings):
+            self.assertEqual(
+                _app.BlytheA4App._extra_sets(fake),
+                [(2, "แบบที่สอง", source.parent / "ขายเเบบ2"), (3, "ของฉัน", Path("/local/mine"))],
+            )
+            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "a4_set2", "sheets_4x6"})
+        settings = {"set2_enabled": "0", "set3_enabled": "0", "set3_folder": "/local/mine"}
+        with unittest.mock.patch.object(_app, "load_user_settings", return_value=settings):
+            self.assertEqual(_app.BlytheA4App._extra_sets(fake), [])
+            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "sheets_4x6"})
+
     def test_trash_restore_and_renumber(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp) / "set1"
