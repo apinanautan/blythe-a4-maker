@@ -9,8 +9,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Install PyInstaller with: python -m pip install pyinstaller"
 }
 
-$releaseDirectory = Join-Path $PSScriptRoot "dist\v1.1.1"
-$workDirectory = Join-Path $PSScriptRoot "build\release\v1.1.1"
+$versionMatch = Select-String -Path "app\blythe_a4_maker.pyw" -Pattern '^APP_VERSION = "([^"]+)"' | Select-Object -First 1
+if (-not $versionMatch) {
+    throw "APP_VERSION was not found in app\blythe_a4_maker.pyw."
+}
+$version = "v" + $versionMatch.Matches[0].Groups[1].Value
+$releaseDirectory = Join-Path $PSScriptRoot "dist\$version"
+$workDirectory = Join-Path $PSScriptRoot "build\release\$version"
 New-Item -ItemType Directory -Force $releaseDirectory | Out-Null
 New-Item -ItemType Directory -Force $workDirectory | Out-Null
 Remove-Item -LiteralPath (Join-Path $releaseDirectory "BlytheEyeMaker.exe"), (Join-Path $releaseDirectory "BlytheEyeMakerAssets.zip") -Force -ErrorAction SilentlyContinue
@@ -46,3 +51,7 @@ if (-not (Test-Path (Join-Path $releaseDirectory "BlytheEyeMaker.exe")) -or -not
 }
 
 Write-Host "Release files are ready in $releaseDirectory"
+if ($env:GITHUB_OUTPUT) {
+    "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "release_dir=$releaseDirectory" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+}
