@@ -52,3 +52,27 @@ jobs:
           Write-Host "Relaunched: $content"
           if ($content[1] -ne (Resolve-Path (Join-Path $install "BlytheEyeMaker.exe")).Path) { throw "Relaunched from the wrong place." }
           if (-not (Test-Path (Join-Path $install "BlytheEyeMaker.exe"))) { throw "EXE missing after update." }
+      - name: Screenshot the UI
+        shell: pwsh
+        run: |
+          $shots = Join-Path $env:RUNNER_TEMP "shots"
+          New-Item -ItemType Directory -Force $shots | Out-Null
+          $env:BLYTHE_UI_SCREENSHOT_DIR = $shots
+          # Stage the cover assets the EXE would otherwise download from this (unreleased) version.
+          $assets = Join-Path $env:APPDATA "BlytheA4Maker\release_assets"
+          New-Item -ItemType Directory -Force $assets | Out-Null
+          Copy-Item -Recurse -Force "app\cover_assets" $assets
+          $version = (Select-String -Path "app\blythe_a4_maker.pyw" -Pattern '^APP_VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          Set-Content -Path (Join-Path $assets "version.txt") -Value "v$version" -NoNewline
+          $env:BLYTHE_UPDATE_TEST_MARKER = ""
+          $exe = Join-Path $env:RUNNER_TEMP "install\BlytheEyeMaker.exe"
+          Start-Process -FilePath $exe
+          $deadline = (Get-Date).AddSeconds(300)
+          while (-not (Test-Path (Join-Path $shots "done.txt")) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
+          Get-ChildItem $shots | Out-String | Write-Host
+          if (Test-Path (Join-Path $shots "done.txt")) { Get-Content (Join-Path $shots "done.txt") }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: ${{ runner.temp }}/shots

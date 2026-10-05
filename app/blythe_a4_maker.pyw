@@ -87,11 +87,16 @@ DATA_SYNC_STATE_FILE = SETTINGS_DIR / "data_sync_state.json"
 TRASH_DIR = SETTINGS_DIR / "trash"
 UPDATE_LOG_FILE = SETTINGS_DIR / "update.log"
 # Where a fresh install keeps the eye library downloaded from GitHub and the customer output.
-DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
+DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"  # customer output (visible)
+# The eye library lives inside the program (hidden) and syncs with GitHub.
+LIBRARY_DIR = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())) / "BlytheA4Maker" / "library"
+LIBRARY_SET1 = LIBRARY_DIR / "ขายเเบบ1"
+LIBRARY_SET2 = LIBRARY_DIR / "ขายเเบบ2"
+LIBRARY_4X6 = LIBRARY_DIR / "ไฟล์ตา"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.13"
+APP_VERSION = "1.2.0"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -626,6 +631,42 @@ def next_design_number(folder: Path) -> int:
     while number in used:
         number += 1
     return number
+
+
+def compact_design_numbers(folder: Path) -> dict[str, str]:
+    """Renumber a set to 1..N without gaps, keeping order; 52.1/52.2 move together. Returns old->new stems."""
+    stems = sorted({path.stem for path in folder.iterdir() if path.is_file() and path.suffix.lower() in VALID_EXTENSIONS and NUMBER_RE.fullmatch(path.stem)}, key=natural_number_key)
+    bases = sorted({int(stem.split(".")[0]) for stem in stems})
+    new_base = {base: index for index, base in enumerate(bases, start=1)}
+    mapping = {}
+    for stem in stems:
+        base, dot, piece = stem.partition(".")
+        new_stem = f"{new_base[int(base)]}{dot}{piece}"
+        if new_stem != stem:
+            mapping[stem] = new_stem
+    staged = []
+    for stem in mapping:
+        for path in design_files(folder, stem):
+            temporary = path.with_name(f".compact_{path.name}")
+            path.replace(temporary)
+            staged.append((temporary, folder / f"{mapping[stem]}{path.suffix}"))
+    for temporary, final in staged:
+        temporary.replace(final)
+    return mapping
+
+
+def copy_into_library(old_folders: list[tuple[Path, Path]]) -> int:
+    """First run after the library moved inside the program: copy designs from the old folders."""
+    copied = 0
+    for old, new in old_folders:
+        if not old.is_dir() or old.resolve() == new.resolve():
+            continue
+        new.mkdir(parents=True, exist_ok=True)
+        for path in old.iterdir():
+            if path.is_file() and path.suffix.lower() in data_sync.SYNC_EXTENSIONS and not (new / path.name).exists():
+                shutil.copy2(path, new / path.name)
+                copied += 1
+    return copied
 
 
 def design_files(folder: Path, stem: str) -> list[Path]:
@@ -1791,23 +1832,27 @@ class BlytheA4App(TkinterDnD.Tk):
         saved_settings = load_user_settings()
         saved_source = saved_settings.get("source_folder", "").strip()
         saved_source_4x6 = saved_settings.get("source_4x6_folder", "").strip()
-        initial_source = Path(saved_source) if saved_source else DEFAULT_SOURCE
-        initial_source_4x6 = (
-            Path(saved_source_4x6)
-            if saved_source_4x6
-            else initial_source.parent / "ไฟล์ตา"
-        )
-        if not saved_source and not DEFAULT_SOURCE.is_dir():
-            # New computer: use a ready-made folder and fill it from GitHub.
-            initial_source = DEFAULT_DATA_ROOT / "ขายเเบบ1"
-            initial_source_4x6 = DEFAULT_DATA_ROOT / "ไฟล์ตา"
-            for folder in (initial_source, second_source_folder(initial_source), initial_source_4x6):
-                folder.mkdir(parents=True, exist_ok=True)
+        for folder in (LIBRARY_SET1, LIBRARY_SET2, LIBRARY_4X6):
+            folder.mkdir(parents=True, exist_ok=True)
+        if saved_settings.get("library_migrated") != "1":
+            # Bring designs over from the folders older versions used (e.g. Dropbox); they stay where they were.
+            old_set1 = Path(saved_source) if saved_source else None
+            old_pairs = []
+            if old_set1 is not None:
+                old_set2 = Path(saved_settings.get("set2_folder") or second_source_folder(old_set1))
+                old_4x6 = Path(saved_source_4x6) if saved_source_4x6 else old_set1.parent / "ไฟล์ตา"
+                old_pairs = [(old_set1, LIBRARY_SET1), (old_set2, LIBRARY_SET2), (old_4x6, LIBRARY_4X6)]
+            try:
+                copy_into_library(old_pairs)
+                saved_settings["library_migrated"] = "1"
+                save_user_settings(saved_settings)
+            except OSError:
+                pass
 
-        self.source_var = tk.StringVar(value=str(initial_source))
-        self.source_4x6_var = tk.StringVar(value=str(initial_source_4x6))
-        self.output_var = tk.StringVar(value=str(initial_source.parent / "A4_ลูกค้า"))
-        self.output_4x6_var = tk.StringVar(value=str(initial_source_4x6.parent / "4x6_ลูกค้า"))
+        self.source_var = tk.StringVar(value=str(LIBRARY_SET1))
+        self.source_4x6_var = tk.StringVar(value=str(LIBRARY_4X6))
+        self.output_var = tk.StringVar(value=str(DEFAULT_DATA_ROOT / "A4_ลูกค้า"))
+        self.output_4x6_var = tk.StringVar(value=str(DEFAULT_DATA_ROOT / "4x6_ลูกค้า"))
         self.customer_var = tk.StringVar()
         self.sync_status_var = tk.StringVar(value="ยังไม่ได้ซิงค์")
         self._data_sync_running = False
@@ -1890,6 +1935,12 @@ class BlytheA4App(TkinterDnD.Tk):
 
         self._build_ui()
         self.bind_all("<Control-v>", self._on_ai_reference_paste_shortcut, add="+")
+        screenshot_dir = os.environ.get("BLYTHE_UI_SCREENSHOT_DIR")
+        if screenshot_dir:
+            import time
+
+            self.geometry("980x900+0+0")
+            self.after(1000, self._ci_screenshot_tick, Path(screenshot_dir), time.time())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         source_a4_ok = Path(self.source_var.get()).is_dir()
         source_4x6_ok = Path(self.source_4x6_var.get()).is_dir()
@@ -1902,6 +1953,32 @@ class BlytheA4App(TkinterDnD.Tk):
         else:
             self.cache_var.set("ตั้งค่า Source ครั้งแรก")
             self.after(150, self.open_settings)
+
+    def _ci_screenshot_tick(self, folder: Path, started: float, stage: int = 0) -> None:
+        """CI only (BLYTHE_UI_SCREENSHOT_DIR): save screenshots of the main window and settings, then quit."""
+        import time
+
+        def grab(window: tk.Misc, name: str) -> None:
+            window.update()
+            box = (window.winfo_rootx(), window.winfo_rooty(),
+                   window.winfo_rootx() + window.winfo_width(), window.winfo_rooty() + window.winfo_height())
+            ImageGrab.grab(bbox=box, all_screens=True).save(folder / name)
+
+        if stage == 0:
+            if not getattr(self, "_data_sync_finished_once", False) and time.time() - started < 150:
+                self.after(1000, self._ci_screenshot_tick, folder, started, 0)
+                return
+            self.after(1500, self._ci_screenshot_tick, folder, started, 1)
+        elif stage == 1:
+            grab(self, "main.png")
+            self.open_settings()
+            self.after(2500, self._ci_screenshot_tick, folder, started, 2)
+        else:
+            dialogs = [child for child in self.winfo_children() if isinstance(child, tk.Toplevel)]
+            if dialogs:
+                grab(dialogs[-1], "settings.png")
+            (folder / "done.txt").write_text(self.cache_var.get() + "\n" + self.sync_status_var.get(), encoding="utf-8")
+            self.destroy()
 
     def _configure_theme(self) -> None:
         style = ttk.Style(self)
@@ -3243,7 +3320,7 @@ class BlytheA4App(TkinterDnD.Tk):
         source = Path(self.source_var.get())
         sets = []
         if settings.get("set2_enabled", "1") == "1":
-            sets.append((2, "แบบที่สอง", Path(settings.get("set2_folder") or second_source_folder(source))))
+            sets.append((2, "แบบที่สอง", second_source_folder(source)))
         set3_folder = settings.get("set3_folder", "").strip()
         if settings.get("set3_enabled", "0") == "1" and set3_folder:
             sets.append((3, settings.get("set3_name", "").strip() or "แบบเพิ่มเติม", Path(set3_folder)))
@@ -3322,6 +3399,7 @@ class BlytheA4App(TkinterDnD.Tk):
 
     def _finish_data_sync(self, result: data_sync.SyncResult | None, error: str | None) -> None:
         self._data_sync_running = False
+        self._data_sync_finished_once = True
         stamp = datetime.now().strftime("%H:%M")
         if error:
             self.sync_status_var.set(f"{stamp} ซิงค์ไม่สำเร็จ: {error}")
@@ -3385,27 +3463,6 @@ class BlytheA4App(TkinterDnD.Tk):
         frame = ttk.Frame(dialog, padding=14)
         frame.pack(fill="both", expand=True)
 
-        a4_var = tk.StringVar(value=self.source_var.get())
-        six_var = tk.StringVar(value=self.source_4x6_var.get())
-
-        ttk.Label(frame, text="Source A4  •  ขายแบบ1", font=("Segoe UI", 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w"
-        )
-        ttk.Label(
-            frame,
-            text="แบบที่หนึ่งเปิดตลอด (รูปที่บันทึกใหม่จะเข้าที่นี่)",
-            style="Muted.TLabel",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 5))
-        ttk.Entry(frame, textvariable=a4_var, width=54).grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        saved = load_user_settings()
-        set2_var = tk.StringVar(
-            value=saved.get("set2_folder") or str(second_source_folder(Path(self.source_var.get())))
-        )
-        set2_on = tk.BooleanVar(value=saved.get("set2_enabled", "1") == "1")
-        set3_var = tk.StringVar(value=saved.get("set3_folder", ""))
-        set3_name_var = tk.StringVar(value=saved.get("set3_name", "") or "แบบเพิ่มเติม")
-        set3_on = tk.BooleanVar(value=saved.get("set3_enabled", "0") == "1")
-
         def browse_into(target: tk.StringVar, title: str) -> None:
             current = Path(target.get()) if target.get() else Path.home()
             initial = current if current.exists() else Path.home()
@@ -3413,34 +3470,40 @@ class BlytheA4App(TkinterDnD.Tk):
             if selected:
                 target.set(selected)
 
-        ttk.Button(
-            frame,
-            text="เลือก...",
-            command=lambda: browse_into(a4_var, "เลือกโฟลเดอร์ Source A4"),
-        ).grid(row=2, column=1, padx=(6, 0), pady=(0, 10))
+        def open_folder(folder: Path) -> None:
+            folder.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["explorer", str(folder)])
+
+        ttk.Label(frame, text="ลายตา", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        library_row = ttk.Frame(frame)
+        library_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        ttk.Label(
+            library_row,
+            text="แบบที่หนึ่ง แบบที่สอง และไฟล์ตา 4×6 เก็บในโปรแกรมและซิงค์กับ GitHub",
+            style="Muted.TLabel",
+        ).pack(side="left")
+        ttk.Button(library_row, text="เปิดโฟลเดอร์", command=lambda: open_folder(LIBRARY_DIR)).pack(side="right")
+
+        saved = load_user_settings()
+        set2_on = tk.BooleanVar(value=saved.get("set2_enabled", "1") == "1")
+        set3_var = tk.StringVar(value=saved.get("set3_folder", ""))
+        set3_name_var = tk.StringVar(value=saved.get("set3_name", "") or "แบบเพิ่มเติม")
+        set3_on = tk.BooleanVar(value=saved.get("set3_enabled", "0") == "1")
 
         sets_frame = ttk.Frame(frame)
-        sets_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        sets_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         sets_frame.columnconfigure(1, weight=1)
 
-        def set_row(row: int, title_widget, path_var: tk.StringVar, enabled: tk.BooleanVar, browse_title: str, note: str) -> None:
-            title_widget.grid(row=row, column=0, sticky="w", padx=(0, 6))
-            entry = ttk.Entry(sets_frame, textvariable=path_var, width=38)
-            entry.grid(row=row, column=1, sticky="ew")
-            browse = ttk.Button(sets_frame, text="เลือก...", command=lambda: browse_into(path_var, browse_title))
-            browse.grid(row=row, column=2, padx=(6, 0))
+        def toggle_button(row: int, enabled: tk.BooleanVar, hint: ttk.Label, note: str, widgets: list) -> None:
             toggle = ttk.Button(sets_frame, width=8)
-            toggle.grid(row=row, column=3, padx=(6, 0))
-            hint = ttk.Label(sets_frame, text=note, style="Muted.TLabel")
-            hint.grid(row=row + 1, column=1, columnspan=3, sticky="w", pady=(0, 6))
+            toggle.grid(row=row, column=3, padx=(6, 0), pady=2)
 
             def refresh() -> None:
                 on = enabled.get()
-                state = "normal" if on else "disabled"
-                entry.configure(state=state)
-                browse.configure(state=state)
+                for widget in widgets:
+                    widget.configure(state="normal" if on else "disabled")
                 toggle.configure(text="✕ ปิด" if on else "＋ เปิด")
-                hint.configure(text=note if on else "ปิดอยู่ • จะไม่แสดงในโปรแกรม")
+                hint.configure(text=note if on else "ปิดอยู่ • ไม่แสดงในโปรแกรม")
 
             def flip() -> None:
                 enabled.set(not enabled.get())
@@ -3449,35 +3512,27 @@ class BlytheA4App(TkinterDnD.Tk):
             toggle.configure(command=flip)
             refresh()
 
-        set_row(
-            0,
-            ttk.Label(sets_frame, text="แบบที่สอง", font=("Segoe UI", 10, "bold")),
-            set2_var,
-            set2_on,
-            "เลือกโฟลเดอร์แบบที่สอง",
-            "ซิงค์กับ GitHub",
-        )
-        set_row(
-            2,
-            ttk.Entry(sets_frame, textvariable=set3_name_var, width=14),
-            set3_var,
-            set3_on,
-            "เลือกโฟลเดอร์ในเครื่อง",
-            "โฟลเดอร์ในเครื่อง • ตั้งชื่อหัวข้อได้ทางซ้าย • ไม่ซิงค์ขึ้น GitHub",
-        )
+        ttk.Label(sets_frame, text="แบบที่สอง", width=14).grid(row=0, column=0, sticky="w")
+        set2_hint = ttk.Label(sets_frame, style="Muted.TLabel")
+        set2_hint.grid(row=0, column=1, columnspan=2, sticky="w")
+        toggle_button(0, set2_on, set2_hint, "เปิดอยู่ • ซิงค์กับ GitHub", [])
 
-        ttk.Label(frame, text="Source 4×6  •  ไฟล์ตา", font=("Segoe UI", 10, "bold")).grid(
-            row=4, column=0, columnspan=2, sticky="w"
+        set3_name = ttk.Entry(sets_frame, textvariable=set3_name_var, width=14)
+        set3_name.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        set3_entry = ttk.Entry(sets_frame, textvariable=set3_var, width=34)
+        set3_entry.grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        set3_browse = ttk.Button(
+            sets_frame, text="เลือก...", command=lambda: browse_into(set3_var, "เลือกโฟลเดอร์ในเครื่อง")
         )
-        ttk.Label(frame, text="โฟลเดอร์ไฟล์ตา 1800×1200 สำหรับหน้าคัสตอม", style="Muted.TLabel").grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(2, 6)
-        )
-        ttk.Entry(frame, textvariable=six_var, width=54).grid(row=6, column=0, sticky="ew")
-        ttk.Button(
-            frame,
-            text="เลือก...",
-            command=lambda: browse_into(six_var, "เลือกโฟลเดอร์ Source 4×6"),
-        ).grid(row=6, column=1, padx=(6, 0))
+        set3_browse.grid(row=1, column=2, padx=(6, 0), pady=(6, 0))
+        set3_hint = ttk.Label(sets_frame, style="Muted.TLabel")
+        set3_hint.grid(row=2, column=1, columnspan=3, sticky="w")
+        toggle_button(1, set3_on, set3_hint, "โฟลเดอร์ในเครื่อง • ไม่ซิงค์ขึ้น GitHub", [set3_entry, set3_browse])
+
+        output_row = ttk.Frame(frame)
+        output_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(output_row, text=f"ไฟล์งานลูกค้า: {DEFAULT_DATA_ROOT}", style="Muted.TLabel").pack(side="left")
+        ttk.Button(output_row, text="เปิดโฟลเดอร์", command=lambda: open_folder(DEFAULT_DATA_ROOT)).pack(side="right")
 
         history_row = ttk.Frame(frame)
         history_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -3568,27 +3623,13 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
-            a4_value = a4_var.get().strip()
-            six_value = six_var.get().strip()
-            a4_folder = Path(a4_value).expanduser()
-            six_folder = Path(six_value).expanduser()
-            if not a4_value or not a4_folder.is_dir():
-                messagebox.showwarning("ไม่พบโฟลเดอร์", "Source A4 ไม่ถูกต้อง", parent=dialog)
-                return
-            if not six_value or not six_folder.is_dir():
-                messagebox.showwarning("ไม่พบโฟลเดอร์", "Source 4×6 ไม่ถูกต้อง", parent=dialog)
-                return
             set3_value = set3_var.get().strip()
             if set3_on.get() and (not set3_value or not Path(set3_value).expanduser().is_dir()):
                 messagebox.showwarning("ไม่พบโฟลเดอร์", f"โฟลเดอร์ของ {set3_name_var.get().strip() or 'แบบเพิ่มเติม'} ไม่ถูกต้อง", parent=dialog)
                 return
-            set2_value = set2_var.get().strip()
-            if set2_value and Path(set2_value).expanduser().resolve() == second_source_folder(a4_folder.resolve()).resolve():
-                set2_value = ""  # the default folder beside set 1 follows set 1 if it moves
             settings = load_user_settings()
             settings.update(
                 {
-                    "set2_folder": str(Path(set2_value).expanduser().resolve()) if set2_value else "",
                     "set2_enabled": "1" if set2_on.get() else "0",
                     "set3_folder": str(Path(set3_value).expanduser().resolve()) if set3_value else "",
                     "set3_name": set3_name_var.get().strip(),
@@ -3599,16 +3640,7 @@ class BlytheA4App(TkinterDnD.Tk):
                 save_user_settings(settings)
             except OSError as exc:
                 messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc), parent=dialog)
-
-            self.source_var.set(str(a4_folder.resolve()))
-            self.source_4x6_var.set(str(six_folder.resolve()))
-            self.output_var.set(str(a4_folder.resolve().parent / "A4_ลูกค้า"))
-            self.output_4x6_var.set(str(six_folder.resolve().parent / "4x6_ลูกค้า"))
             save_token()
-            try:
-                self._save_source_settings()
-            except OSError as exc:
-                messagebox.showwarning("บันทึกการตั้งค่าไม่ได้", str(exc), parent=dialog)
 
             dialog.grab_release()
             dialog.destroy()
@@ -3640,7 +3672,7 @@ class BlytheA4App(TkinterDnD.Tk):
 
     def _uninstall_targets(self, include_custom_library: bool) -> list[Path]:
         """Everything the app created: its hidden data folder, prepared caches and the program itself."""
-        targets: list[Path] = [SETTINGS_DIR]
+        targets: list[Path] = [SETTINGS_DIR, LIBRARY_DIR.parent]
         source = Path(self.source_var.get()).expanduser()
         if source.is_dir():
             cache_roots = [source, *(path for path in source.parent.iterdir() if path.is_dir())]
@@ -4501,17 +4533,12 @@ class BlytheA4App(TkinterDnD.Tk):
             bg=UI_SURFACE,
             highlightthickness=1,
             highlightbackground=UI_BORDER,
-            padx=12,
-            pady=10,
+            padx=14,
+            pady=12,
         )
         panel.grid(row=row, column=0, columnspan=6, sticky="ew", padx=3, pady=(4, 12))
-        ttk.Label(
-            panel,
-            text="ลากรูปมาครอปสำหรับ A4",
-            font=("Segoe UI", 10, "bold"),
-            foreground=UI_ACCENT_DARK,
-        ).pack()
-        ttk.Label(panel, textvariable=self.custom_a4_crop_status, style="Muted.TLabel").pack(pady=(2, 6))
+        panel.columnconfigure(1, weight=1)
+
         crop = tk.Canvas(
             panel,
             width=CUSTOM_A4_CROP_PREVIEW_PX,
@@ -4522,73 +4549,102 @@ class BlytheA4App(TkinterDnD.Tk):
             highlightcolor=UI_ACCENT,
             cursor="hand2",
         )
-        crop.pack()
+        crop.grid(row=0, column=0, sticky="n")
         crop.bind("<ButtonPress-1>", self._begin_custom_a4_pan)
         crop.bind("<B1-Motion>", self._move_custom_a4_pan)
         crop.bind("<ButtonRelease-1>", lambda _event: setattr(self, "custom_a4_pan_last", None))
         crop.drop_target_register(DND_FILES)
         crop.dnd_bind("<<Drop>>", self._on_a4_file_drop)
         self.custom_a4_crop_canvas = crop
-        ttk.Label(panel, text="ลากรูปในกรอบเพื่อเลื่อนตำแหน่ง", style="Muted.TLabel").pack(pady=(4, 0))
 
+        side = tk.Frame(panel, bg=UI_SURFACE)
+        side.grid(row=0, column=1, sticky="nsew", padx=(16, 0))
+        tk.Label(
+            side, text="ครอปรูปตา", font=("Segoe UI", 12, "bold"), fg=UI_ACCENT_DARK, bg=UI_SURFACE
+        ).pack(anchor="w")
+        tk.Label(
+            side,
+            textvariable=self.custom_a4_crop_status,
+            font=("Segoe UI", 9),
+            fg=UI_MUTED,
+            bg=UI_SURFACE,
+            wraplength=300,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
+        def step(title: str) -> tk.Frame:
+            box = tk.Frame(side, bg=UI_SURFACE)
+            box.pack(fill="x", pady=(4, 8))
+            tk.Label(box, text=title, font=("Segoe UI", 9, "bold"), fg=UI_TEXT, bg=UI_SURFACE).pack(anchor="w", pady=(0, 4))
+            return box
+
+        choose = step("① เลือกรูป")
+        ttk.Button(choose, text="เลือกรูป…", command=self.add_custom_a4).pack(fill="x")
+        tk.Label(
+            choose, text="หรือลากไฟล์มาวางในกรอบทางซ้าย", font=("Segoe UI", 8), fg=UI_MUTED, bg=UI_SURFACE
+        ).pack(anchor="w", pady=(2, 0))
+
+        adjust = step("② ปรับ (ถ้าต้องการ)")
+        self.custom_a4_crop_toggle_button = ttk.Button(adjust, command=self._toggle_custom_a4_crop)
+        self.custom_a4_crop_toggle_button.pack(fill="x")
         self.custom_a4_zoom_scale = tk.Scale(
-            panel,
+            adjust,
             from_=50,
             to=200,
             resolution=5,
             orient="horizontal",
             variable=self.custom_a4_zoom,
             command=lambda _value: self._render_custom_a4_crop(),
-            length=CUSTOM_A4_CROP_PREVIEW_PX,
-            showvalue=True,
+            showvalue=False,
             bg=UI_SURFACE,
             fg=UI_TEXT,
+            troughcolor=UI_ACCENT_SOFT,
             highlightthickness=0,
-            label="ย่อ / ขยาย ให้พอดีกรอบครอป",
-            state=("normal" if self.custom_a4_crop_mode else "disabled"),
+            label="ซูม (ลากรูปในกรอบเพื่อเลื่อน)",
         )
-        self.custom_a4_zoom_scale.pack(pady=(4, 4))
-        actions = ttk.Frame(panel)
-        actions.pack()
-        ttk.Button(actions, text="เลือกภาพ", command=self.add_custom_a4).pack(side="left", padx=3)
-        direct_button = ttk.Button(
-            actions,
-            text="ส่งภาพเดิมเข้า A4",
-            command=lambda: self._apply_custom_a4_crop(persist=False, crop=False),
-            state=("normal" if self.custom_a4_image else "disabled"),
+        self.custom_a4_zoom_scale.pack(fill="x", pady=(4, 0))
+
+        send = step("③ ส่งไปใช้")
+        self.custom_a4_add_a4_button = tk.Button(
+            send,
+            text="เพิ่มลง A4",
+            command=lambda: self._apply_custom_a4_crop(persist=False),
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            disabledforeground="#E3F1EA",
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            pady=6,
+            cursor="hand2",
         )
-        direct_button.pack(side="left", padx=3)
-        crop_toggle_button = ttk.Button(
-            actions,
-            text=("ยกเลิกครอป" if self.custom_a4_crop_mode else "ครอป / จัดตำแหน่ง"),
-            command=self._toggle_custom_a4_crop,
-            state=("normal" if self.custom_a4_image else "disabled"),
+        self.custom_a4_add_a4_button.pack(fill="x")
+        row_two = tk.Frame(send, bg=UI_SURFACE)
+        row_two.pack(fill="x", pady=(6, 0))
+        self.custom_a4_add_4x6_button = ttk.Button(row_two, text="เพิ่มลง 4×6", command=self._custom_a4_to_4x6)
+        self.custom_a4_add_4x6_button.pack(side="left", fill="x", expand=True)
+        self.custom_a4_save_button = ttk.Button(
+            row_two, text="บันทึกเข้าแบบที่หนึ่ง", command=lambda: self._apply_custom_a4_crop(persist=True)
         )
-        crop_toggle_button.pack(side="left", padx=3)
-        crop_button = ttk.Button(
-            actions,
-            text="ใช้ครอปเพิ่ม A4",
-            command=lambda: self._apply_custom_a4_crop(persist=False, crop=True),
-            state=("normal" if self.custom_a4_crop_mode else "disabled"),
-        )
-        crop_button.pack(side="left", padx=3)
-        save_button = ttk.Button(
-            actions,
-            text="บันทึกเป็นแบบที่หนึ่ง",
-            command=lambda: self._apply_custom_a4_crop(persist=True),
-            state=("normal" if self.custom_a4_image else "disabled"),
-        )
-        save_button.pack(side="left", padx=3)
-        more_actions = ttk.Frame(panel)
-        more_actions.pack(pady=(4, 0))
-        six_button = ttk.Button(
-            more_actions,
-            text="เพิ่มลงหน้า 4×6",
-            command=self._custom_a4_to_4x6,
-            state=("normal" if self.custom_a4_image else "disabled"),
-        )
-        six_button.pack(side="left", padx=3)
-        self.custom_a4_crop_buttons = [direct_button, crop_toggle_button, crop_button, save_button, six_button]
+        self.custom_a4_save_button.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        tk.Label(
+            send,
+            text="ถ้าเปิดครอปอยู่จะใช้รูปที่ครอป ถ้าไม่ได้ครอปจะใช้รูปเต็ม",
+            font=("Segoe UI", 8),
+            fg=UI_MUTED,
+            bg=UI_SURFACE,
+            wraplength=300,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+
+        self.custom_a4_crop_buttons = [
+            self.custom_a4_crop_toggle_button,
+            self.custom_a4_add_a4_button,
+            self.custom_a4_add_4x6_button,
+            self.custom_a4_save_button,
+        ]
         self._update_custom_a4_crop_actions()
         if self.custom_a4_image is not None:
             self._render_custom_a4_crop()
@@ -4644,11 +4700,14 @@ class BlytheA4App(TkinterDnD.Tk):
         has_image = self.custom_a4_image is not None
         if self.custom_a4_zoom_scale is not None:
             self.custom_a4_zoom_scale.configure(state=("normal" if has_image and self.custom_a4_crop_mode else "disabled"))
-        for index, button in enumerate(self.custom_a4_crop_buttons):
-            enabled = has_image and (index != 2 or self.custom_a4_crop_mode)
-            button.configure(state=("normal" if enabled else "disabled"))
-        if len(self.custom_a4_crop_buttons) > 1:
-            self.custom_a4_crop_buttons[1].configure(text=("ยกเลิกครอป" if self.custom_a4_crop_mode else "ครอป / จัดตำแหน่ง"))
+        for button in self.custom_a4_crop_buttons:
+            button.configure(state=("normal" if has_image else "disabled"))
+        toggle = getattr(self, "custom_a4_crop_toggle_button", None)
+        if toggle is not None:
+            toggle.configure(text=("✓ กำลังครอป • กดเพื่อยกเลิก" if self.custom_a4_crop_mode else "✂ ครอป / จัดตำแหน่ง"))
+        add_a4 = getattr(self, "custom_a4_add_a4_button", None)
+        if add_a4 is not None:
+            add_a4.configure(bg=UI_ACCENT if has_image else "#A9D9BF")
 
     def _toggle_custom_a4_crop(self) -> None:
         if self.custom_a4_image is None:
@@ -4710,6 +4769,7 @@ class BlytheA4App(TkinterDnD.Tk):
         menu.add_separator()
         if not design_id.startswith("custom:"):
             menu.add_command(label="เปลี่ยนเบอร์", command=lambda: self._renumber_design(design_id))
+            menu.add_command(label="เรียงเลขทั้งชุดใหม่ให้ต่อกัน", command=lambda: self._compact_set(design_id))
         menu.add_command(
             label=f"ลบเฉพาะรูปนี้ ({display_design_id(design_id)})",
             command=lambda: self._delete_custom_a4(design_id),
@@ -4864,6 +4924,28 @@ class BlytheA4App(TkinterDnD.Tk):
             id_map[f"{group}:{new_stem}"] = design_id
         self._reload_keeping_selection(id_map)
         self.cache_var.set(f"เปลี่ยนเบอร์ {old_stem} → {new_stem} แล้ว" + (" (สลับกัน)" if swap else ""))
+        self._start_data_sync()
+
+    def _compact_set(self, design_id: str) -> None:
+        path = self.assets.get(design_id)
+        if path is None:
+            return
+        group = design_id.split(":", 1)[0]
+        title = getattr(self, "set_titles", {}).get(int(group.removeprefix("set") or 1), "ชุดนี้")
+        if not messagebox.askyesno(
+            "เรียงเลขใหม่",
+            f"เรียงเลขของ{title}ใหม่ให้ต่อกันตั้งแต่ 1 โดยลำดับเหมือนเดิม?\n\n"
+            "เบอร์ที่ลูกค้าเคยเห็นอาจเปลี่ยน (เช่น 69 อาจกลายเป็น 63)",
+            parent=self,
+        ):
+            return
+        try:
+            mapping = compact_design_numbers(path.parent)
+        except OSError as exc:
+            messagebox.showerror("เรียงเลขไม่ได้", str(exc), parent=self)
+            return
+        self._reload_keeping_selection({f"{group}:{old}": f"{group}:{new}" for old, new in mapping.items()})
+        self.cache_var.set(f"เรียงเลขใหม่แล้ว • เปลี่ยน {len(mapping)} เบอร์" if mapping else "เลขต่อกันอยู่แล้ว")
         self._start_data_sync()
 
     def _open_trash(self, parent: tk.Toplevel) -> None:

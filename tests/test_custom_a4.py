@@ -20,6 +20,31 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_compact_numbers_keeps_order_and_pieces_together(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            for name in ("50.png", "52.1.png", "52.2.png", "55.psd", "55.png", "69.png", "notes.txt"):
+                (folder / name).write_text(name)
+            mapping = _app.compact_design_numbers(folder)
+            self.assertEqual(mapping, {"50": "1", "52.1": "2.1", "52.2": "2.2", "55": "3", "69": "4"})
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), [
+                "1.png", "2.1.png", "2.2.png", "3.png", "3.psd", "4.png", "notes.txt",
+            ])
+            self.assertEqual((folder / "4.png").read_text(), "69.png")
+            self.assertEqual(_app.compact_design_numbers(folder), {})
+
+    def test_old_folders_are_copied_into_the_library_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old = Path(temp) / "dropbox"
+            new = Path(temp) / "library"
+            old.mkdir()
+            (old / "1.png").write_text("one")
+            (old / "readme.txt").write_text("skip")
+            self.assertEqual(_app.copy_into_library([(old, new)]), 1)
+            self.assertEqual(_app.copy_into_library([(old, new)]), 0)
+            self.assertEqual((new / "1.png").read_text(), "one")
+            self.assertTrue((old / "1.png").exists())
+
     def test_turned_off_sets_are_hidden_and_set_three_is_not_synced(self):
         from types import SimpleNamespace
 
