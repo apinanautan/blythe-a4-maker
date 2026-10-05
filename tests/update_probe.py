@@ -23,9 +23,13 @@ incoming = work / "incoming.exe"
 log = work / "probe.log"
 
 
+HARMLESS_EXE = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "whoami.exe"
+
+
 def reset() -> None:
-    target.write_bytes(b"old")
-    incoming.write_bytes(b"new")
+    # A real program so Start-Process succeeds without opening anything.
+    target.write_bytes(HARMLESS_EXE.read_bytes())
+    incoming.write_bytes(HARMLESS_EXE.read_bytes() + b"")
     log.unlink(missing_ok=True)
 
 
@@ -49,4 +53,4 @@ for name, kwargs in (
     print("stdout:", result.stdout.strip())
     print("stderr:", result.stderr.strip())
     print("log:", log.read_text(encoding="utf-8-sig") if log.exists() else "<none>")
-    print("target now:", target.read_bytes() if target.exists() else "<missing>")
+    print("target exists:", target.exists(), "old copy:", Path(f"{target}.old").exists(), "incoming left:", incoming.exists())
