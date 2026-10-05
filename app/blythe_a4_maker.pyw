@@ -6,8 +6,11 @@ import sys
 import json
 import os
 import random
+import shutil
 import tempfile
 import threading
+import urllib.request
+import zipfile
 from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
@@ -15,8 +18,9 @@ import statistics
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from tkinterdnd2 import DND_FILES, TkinterDnD
 
-from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageGrab, ImageOps, ImageTk
 from blythe_ai import (
     BACKGROUND_PROMPTS,
     COLOR_PROMPTS,
@@ -30,6 +34,7 @@ from customer_portal import CustomerPortal
 
 
 DPI = 300
+CUSTOMER_LINK_NTFY_URL = "https://ntfy.sh/BlytheEyes"
 A4_WIDTH = 2480
 A4_HEIGHT = 3508
 SIX_BY_FOUR_WIDTH = 1800
@@ -56,6 +61,7 @@ CACHE_VERSION = 2
 CACHE_DIR_NAME = "_prepared_14.5mm"
 CACHE_MANIFEST_NAME = "prepared_manifest.json"
 CACHE_STATUS_NAME = "สถานะไฟล์.txt"
+CUSTOM_A4_DIR_NAME = "_custom_a4"
 
 # Modern white/green UI palette.
 UI_BG = "#F5FAF7"
@@ -73,6 +79,7 @@ DEFAULT_SOURCE_4X6 = DEFAULT_SOURCE.parent / "ไฟล์ตา"
 DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
+APP_UPDATE_URL = "https://github.com/apinanautan/blythe-a4-maker/archive/refs/heads/main.zip"
 
 COVER_CANVAS_SIZE = 1000
 COVER_EYE_SIZE = 195
@@ -106,6 +113,8 @@ def design_key(group: int, design_id: str) -> str:
 
 
 def display_design_id(value: str) -> str:
+    if value.startswith("custom:"):
+        return f"คัส {value.split(':', 1)[1]}"
     return value.split(":", 1)[1] if ":" in value else value
 
 
@@ -168,6 +177,50 @@ def save_user_settings(settings: dict[str, str]) -> None:
     temp_file.replace(SETTINGS_FILE)
 
 
+def extract_update_archive(archive_path: Path, work_dir: Path) -> Path:
+    """Safely unpack the GitHub source archive and return its repository root."""
+    source_dir = work_dir / "source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            normalized = info.filename.replace("\\", "/")
+            parts = Path(normalized).parts
+            if not parts or normalized.startswith("/") or any(part in ("", ".", "..") for part in parts):
+                raise ValueError("ไฟล์อัปเดตมีเส้นทางที่ไม่ปลอดภัย")
+            if len(parts) < 2:
+                continue
+            target = source_dir.joinpath(*parts[1:])
+            if not target.resolve().is_relative_to(source_dir.resolve()):
+                raise ValueError("ไฟล์อัปเดตอยู่นอกโฟลเดอร์โปรแกรม")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, target.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+    if not (source_dir / "app" / "blythe_a4_maker.pyw").is_file() and not (
+        source_dir / "blythe_a4_maker.pyw"
+    ).is_file():
+        raise ValueError("ไฟล์ที่ดาวน์โหลดไม่ใช่ Blythe Eye Maker เวอร์ชันที่ถูกต้อง")
+    return source_dir
+
+
+def download_update_archive(work_dir: Path) -> Path:
+    archive_path = work_dir / "latest.zip"
+    request = urllib.request.Request(APP_UPDATE_URL, headers={"User-Agent": "Blythe-Eye-Maker-Updater"})
+    with urllib.request.urlopen(request, timeout=60) as response, archive_path.open("wb") as archive:
+        length = int(response.headers.get("Content-Length", "0") or 0)
+        if length > 250 * 1024 * 1024:
+            raise ValueError("ไฟล์อัปเดตมีขนาดใหญ่เกินไป")
+        total = 0
+        while chunk := response.read(1024 * 1024):
+            total += len(chunk)
+            if total > 250 * 1024 * 1024:
+                raise ValueError("ไฟล์อัปเดตมีขนาดใหญ่เกินไป")
+            archive.write(chunk)
+    return archive_path
+
+
 def natural_number_key(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
 
@@ -191,6 +244,21 @@ def discover_assets(folder: Path) -> OrderedDict[str, Path]:
 
     return OrderedDict(
         (key, found[key]) for key in sorted(found, key=natural_number_key)
+    )
+
+
+def discover_custom_a4_items(folder: Path) -> OrderedDict[str, tuple[Path, tuple[Path, ...]]]:
+    """Load saved custom eye pairs from the A4 custom library."""
+    pairs: dict[int, dict[int, Path]] = {}
+    if folder.is_dir():
+        for path in folder.glob("custom_*_*.png"):
+            match = re.fullmatch(r"custom_(\d+)_(1|2)", path.stem)
+            if match:
+                pairs.setdefault(int(match.group(1)), {})[int(match.group(2))] = path
+    return OrderedDict(
+        (f"custom:{number:03d}", (files[1], (files[1], files[2])))
+        for number, files in sorted(pairs.items())
+        if 1 in files and 2 in files
     )
 
 
@@ -485,6 +553,195 @@ def make_round_ui_thumbnail(source: Image.Image, size_px: int) -> Image.Image:
     return resized
 
 
+def remove_outer_background(image: Image.Image, threshold: int = 42) -> Image.Image:
+    """Remove the sampled edge color while preserving enclosed pixels of that color."""
+    rgba = image.convert("RGBA")
+    rgb = rgba.convert("RGB")
+    width, height = rgb.size
+    corners = (rgb.getpixel((0, 0)), rgb.getpixel((width - 1, 0)), rgb.getpixel((0, height - 1)), rgb.getpixel((width - 1, height - 1)))
+    background = tuple(sorted(pixel[channel] for pixel in corners)[len(corners) // 2] for channel in range(3))
+    candidates = ImageChops.difference(rgb, Image.new("RGB", rgb.size, background))
+    candidates = candidates.convert("L").point(lambda value: 255 if value <= threshold else 0)
+    width, height = candidates.size
+    for x in range(width):
+        if candidates.getpixel((x, 0)):
+            ImageDraw.floodfill(candidates, (x, 0), 128)
+        if candidates.getpixel((x, height - 1)):
+            ImageDraw.floodfill(candidates, (x, height - 1), 128)
+    for y in range(height):
+        if candidates.getpixel((0, y)):
+            ImageDraw.floodfill(candidates, (0, y), 128)
+        if candidates.getpixel((width - 1, y)):
+            ImageDraw.floodfill(candidates, (width - 1, y), 128)
+    foreground = candidates.point(lambda value: 0 if value == 128 else 255)
+    rgba.putalpha(ImageChops.multiply(rgba.getchannel("A"), foreground))
+    return rgba
+
+
+def _has_white_background(image: Image.Image) -> bool:
+    rgb = image.convert("RGB")
+    corners = (
+        rgb.getpixel((0, 0)),
+        rgb.getpixel((rgb.width - 1, 0)),
+        rgb.getpixel((0, rgb.height - 1)),
+        rgb.getpixel((rgb.width - 1, rgb.height - 1)),
+    )
+    return all(min(pixel) >= 220 and max(pixel) - min(pixel) <= 45 for pixel in corners)
+
+
+def _has_uniform_edge_background(image: Image.Image) -> bool:
+    rgba = image.convert("RGBA")
+    points = ((0, 0), (rgba.width - 1, 0), (0, rgba.height - 1), (rgba.width - 1, rgba.height - 1))
+    corners = [rgba.getpixel(point) for point in points]
+    if min(pixel[3] for pixel in corners) < 240:
+        return False
+    spread = max(max(pixel[channel] for pixel in corners) - min(pixel[channel] for pixel in corners) for channel in range(3))
+    background = tuple(sorted(pixel[channel] for pixel in corners)[len(corners) // 2] for channel in range(3))
+    center = rgba.getpixel((rgba.width // 2, rgba.height // 2))
+    center_difference = sum(abs(center[channel] - background[channel]) for channel in range(3)) / 3
+    return spread <= 32 and center_difference >= 30
+
+
+def trim_custom_a4_transparent_margin(image: Image.Image, threshold: int = 12) -> Image.Image:
+    """Center crop artwork by its visible pixels instead of uneven empty file margins."""
+    rgba = image.convert("RGBA")
+    visible = rgba.getchannel("A").point(lambda alpha: 255 if alpha > threshold else 0)
+    bounds = visible.getbbox()
+    return rgba.crop(bounds) if bounds else rgba
+
+
+def make_custom_a4_pair(
+    image: Image.Image,
+    size_px: int,
+    zoom: float = 1.0,
+    remove_background: bool = False,
+    pan_x: float = 0.0,
+    pan_y: float = 0.0,
+) -> tuple[Image.Image, Image.Image]:
+    """Fit custom art to equal circular print slots, optionally removing edge-connected white."""
+    source = image.convert("RGBA")
+    if source.width >= source.height * 1.7:
+        midpoint = source.width // 2
+        pieces = (source.crop((0, 0, midpoint, source.height)), source.crop((midpoint, 0, source.width, source.height)))
+    else:
+        pieces = (source, source.copy())
+
+    zoom = max(0.25, min(float(zoom), 2.5))
+    outputs: list[Image.Image] = []
+    for piece in pieces:
+        if remove_background:
+            piece = remove_outer_background(piece)
+        scale = size_px * zoom / max(piece.size)
+        resized = piece.resize(
+            (max(1, round(piece.width * scale)), max(1, round(piece.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        canvas = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
+        pan_x = max(-1.0, min(float(pan_x), 1.0))
+        pan_y = max(-1.0, min(float(pan_y), 1.0))
+        dest_x = (
+            -round((resized.width - size_px) * (1 - pan_x) / 2)
+            if resized.width > size_px
+            else round((size_px - resized.width) * (1 + pan_x) / 2)
+        )
+        dest_y = (
+            -round((resized.height - size_px) * (1 - pan_y) / 2)
+            if resized.height > size_px
+            else round((size_px - resized.height) * (1 + pan_y) / 2)
+        )
+        source_box = (
+            max(0, -dest_x),
+            max(0, -dest_y),
+            min(resized.width, size_px - dest_x),
+            min(resized.height, size_px - dest_y),
+        )
+        if source_box[2] > source_box[0] and source_box[3] > source_box[1]:
+            canvas.alpha_composite(resized.crop(source_box), (max(0, dest_x), max(0, dest_y)))
+        mask = Image.new("L", (size_px * 4, size_px * 4), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, size_px * 4 - 1, size_px * 4 - 1), fill=255)
+        canvas.putalpha(ImageChops.multiply(canvas.getchannel("A"), mask.resize((size_px, size_px), Image.Resampling.LANCZOS)))
+        outputs.append(canvas)
+    return outputs[0], outputs[1]
+
+
+def make_custom_a4_crop_preview(
+    image: Image.Image,
+    size_px: int,
+    zoom: float,
+    pan_x: float = 0.0,
+    pan_y: float = 0.0,
+) -> Image.Image:
+    """Render the small interactive crop preview without the print-resolution pipeline."""
+    source = image.convert("RGBA")
+    if source.width >= source.height * 1.7:
+        source = source.crop((0, 0, source.width // 2, source.height))
+    scale = max(0.25, min(float(zoom), 2.5)) * size_px / max(source.size)
+    resized = source.resize(
+        (max(1, round(source.width * scale)), max(1, round(source.height * scale))),
+        Image.Resampling.BILINEAR,
+    )
+    dest_x = (
+        -round((resized.width - size_px) * (1 - pan_x) / 2)
+        if resized.width > size_px
+        else round((size_px - resized.width) * (1 + pan_x) / 2)
+    )
+    dest_y = (
+        -round((resized.height - size_px) * (1 - pan_y) / 2)
+        if resized.height > size_px
+        else round((size_px - resized.height) * (1 + pan_y) / 2)
+    )
+    source_box = (
+        max(0, -dest_x),
+        max(0, -dest_y),
+        min(resized.width, size_px - dest_x),
+        min(resized.height, size_px - dest_y),
+    )
+    preview = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
+    if source_box[2] > source_box[0] and source_box[3] > source_box[1]:
+        preview.alpha_composite(resized.crop(source_box), (max(0, dest_x), max(0, dest_y)))
+    return preview
+
+
+def make_custom_a4_crop_guide(size_px: int) -> Image.Image:
+    """Draw a fixed, centered circular crop guide over the movable source image."""
+    scale = 3
+    size = max(1, int(size_px))
+    hi_size = size * scale
+    guide = Image.new("RGBA", (hi_size, hi_size), (35, 45, 40, 132))
+    draw = ImageDraw.Draw(guide)
+    bounds = (0, 0, hi_size - 1, hi_size - 1)
+    draw.ellipse(bounds, fill=(35, 45, 40, 0))
+    # A dark halo keeps the crop edge visible over both bright and dark artwork.
+    draw.ellipse(bounds, outline=(20, 28, 24, 230), width=5 * scale)
+    inset = 2 * scale
+    draw.ellipse(
+        (inset, inset, hi_size - 1 - inset, hi_size - 1 - inset),
+        outline=(255, 255, 255, 255),
+        width=2 * scale,
+    )
+    return guide.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def make_custom_a4_pair_as_is(image: Image.Image, size_px: int) -> tuple[Image.Image, Image.Image]:
+    """Place complete artwork in the standard square print size without cropping or masking."""
+    source = image.convert("RGBA")
+    if source.width >= source.height * 1.7:
+        midpoint = source.width // 2
+        pieces = (source.crop((0, 0, midpoint, source.height)), source.crop((midpoint, 0, source.width, source.height)))
+    else:
+        pieces = (source, source.copy())
+
+    result: list[Image.Image] = []
+    for piece in pieces:
+        fitted = ImageOps.contain(piece, (size_px, size_px), Image.Resampling.LANCZOS)
+        corners = [piece.getpixel(point) for point in ((0, 0), (piece.width - 1, 0), (0, piece.height - 1), (piece.width - 1, piece.height - 1))]
+        background = (255, 255, 255, 255) if all(pixel[3] == 255 for pixel in corners) else (0, 0, 0, 0)
+        canvas = Image.new("RGBA", (size_px, size_px), background)
+        canvas.alpha_composite(fitted, ((size_px - fitted.width) // 2, (size_px - fitted.height) // 2))
+        result.append(canvas)
+    return result[0], result[1]
+
+
 def _sample_template_sclera_color(
     canvas: Image.Image,
     center: tuple[int, int],
@@ -741,7 +998,7 @@ def cached_design_chips(
     chips: list[Image.Image] = []
     for path in paths:
         with Image.open(path) as opened:
-            chip = opened.convert("RGB")
+            chip = flatten_to_white(opened)
         if chip.size != (size_px, size_px):
             chip = chip.resize((size_px, size_px), Image.Resampling.LANCZOS)
         chips.append(chip)
@@ -992,7 +1249,7 @@ def parse_quick_numbers(text: str) -> list[str]:
     return [item for item in re.split(r"[\s,;/]+", text.strip()) if item]
 
 
-class BlytheA4App(tk.Tk):
+class BlytheA4App(TkinterDnD.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Blythe Eye Maker")
@@ -1030,6 +1287,24 @@ class BlytheA4App(tk.Tk):
 
         self.assets: OrderedDict[str, Path] = OrderedDict()
         self.prepared_assets: OrderedDict[str, tuple[Path, ...]] = OrderedDict()
+        self.custom_a4_temp = tempfile.TemporaryDirectory(prefix="blythe_a4_custom_")
+        self.custom_a4_items: OrderedDict[str, tuple[Path, tuple[Path, ...]]] = OrderedDict()
+        self.custom_a4_counter = 0
+        self.custom_a4_image: Image.Image | None = None
+        self.custom_a4_preview_image: Image.Image | None = None
+        self.custom_a4_crop_source: Image.Image | None = None
+        self.custom_a4_crop_preview_image: Image.Image | None = None
+        self.custom_a4_crop_mode = False
+        self.custom_a4_source_path: Path | None = None
+        self.custom_a4_zoom = tk.IntVar(value=100)
+        self.custom_a4_crop_status = tk.StringVar(value="ลากรูปมาวางในช่อง หรือคลิกเพื่อเลือก")
+        self.custom_a4_crop_photo: ImageTk.PhotoImage | None = None
+        self.custom_a4_crop_canvas: tk.Canvas | None = None
+        self.custom_a4_zoom_scale: tk.Scale | None = None
+        self.custom_a4_crop_buttons: list[ttk.Button] = []
+        self.custom_a4_pan_x = 0.0
+        self.custom_a4_pan_y = 0.0
+        self.custom_a4_pan_last: tuple[int, int] | None = None
         self.cache_stats: dict[str, object] = {}
         self.design_ids: list[str] = []
         self.selections: OrderedDict[str, int] = OrderedDict()
@@ -1060,6 +1335,9 @@ class BlytheA4App(tk.Tk):
         self.six_preview_photo: ImageTk.PhotoImage | None = None
         self.ai_image: Image.Image | None = None
         self.ai_image_path: Path | None = None
+        self.ai_reference_image: Path | None = None
+        self.ai_reference_temp_path: Path | None = None
+        self.ai_single_conversation_state: dict[str, str] = {}
         self.ai_single_preview_photo: ImageTk.PhotoImage | None = None
         self.ai_collection_preview_photo: ImageTk.PhotoImage | None = None
         self.ai_collection_plan: dict | None = None
@@ -1068,8 +1346,10 @@ class BlytheA4App(tk.Tk):
         self.portal_status_var = tk.StringVar(value="ปิดอยู่")
         self.portal_url_var = tk.StringVar(value="ปิดอยู่ — ยังไม่มีลิงก์ใช้งาน")
         self.customer_portal: CustomerPortal | None = None
+        self._last_ntfy_customer_url: str | None = None
 
         self._build_ui()
+        self.bind_all("<Control-v>", self._on_ai_reference_paste_shortcut, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         source_a4_ok = Path(self.source_var.get()).is_dir()
         source_4x6_ok = Path(self.source_4x6_var.get()).is_dir()
@@ -1492,6 +1772,38 @@ class BlytheA4App(tk.Tk):
         form = ttk.Frame(body)
         form.grid(row=0, column=0, sticky="nsew", padx=(4, 16))
         self.ai_single_prompt_text = self._build_ai_options(form)
+        reference_row = ttk.Frame(form)
+        reference_row.pack(fill="x", pady=(0, 8))
+        self.ai_reference_button = ttk.Button(
+            reference_row,
+            text="แนบรูปอ้างอิง",
+            command=self._choose_ai_reference_image,
+        )
+        self.ai_reference_button.pack(side="left")
+        self.ai_reference_paste_button = ttk.Button(
+            reference_row,
+            text="วางรูป",
+            command=self._paste_ai_reference_image,
+        )
+        self.ai_reference_paste_button.pack(side="left", padx=(6, 0))
+        self.ai_reference_name_var = tk.StringVar(value="ยังไม่ได้แนบรูป")
+        ttk.Label(
+            reference_row,
+            textvariable=self.ai_reference_name_var,
+            style="Muted.TLabel",
+        ).pack(side="left", padx=8, fill="x", expand=True)
+        self.ai_reference_remove_button = ttk.Button(
+            reference_row,
+            text="เอาออก",
+            command=self._clear_ai_reference_image,
+            state="disabled",
+        )
+        self.ai_reference_remove_button.pack(side="right")
+        ttk.Label(
+            form,
+            text="วางรูปที่แคปไว้หรือแนบไฟล์ แล้วระบุเฉพาะส่วนที่ต้องการเปลี่ยน",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 6))
         self.ai_generate_button = tk.Button(
             form,
             text="สร้าง 1 คู่",
@@ -1635,6 +1947,43 @@ class BlytheA4App(tk.Tk):
         setattr(self, f"ai_{target}_preview_label", label)
         self._set_ai_preview(Image.new("RGBA", (240, 240), (255, 255, 255, 0)), target)
         ttk.Button(preview, text="เปิดโฟลเดอร์", command=self.open_ai_output_folder).pack(fill="x")
+        if target == "single":
+            ttk.Label(
+                preview,
+                text="แก้ไขรูปล่าสุด",
+                font=("Segoe UI", 9, "bold"),
+                foreground=UI_ACCENT_DARK,
+            ).pack(anchor="w", pady=(10, 2))
+            self.ai_edit_prompt_text = tk.Text(
+                preview,
+                height=2,
+                width=29,
+                wrap="word",
+                bg=UI_SURFACE,
+                fg=UI_TEXT,
+                relief="solid",
+                bd=1,
+                font=("Segoe UI", 9),
+            )
+            self.ai_edit_prompt_text.pack(fill="x", pady=(0, 5))
+            self.ai_edit_button = tk.Button(
+                preview,
+                text="แก้ไขรูปนี้",
+                command=self.edit_ai_eye,
+                bg=UI_ACCENT_DARK,
+                fg="white",
+                activebackground=UI_ACCENT,
+                activeforeground="white",
+                font=("Segoe UI", 9, "bold"),
+                relief="flat",
+                padx=8,
+                pady=7,
+                cursor="hand2",
+                bd=0,
+                highlightthickness=0,
+                state="disabled",
+            )
+            self.ai_edit_button.pack(fill="x")
 
     def _set_ai_preview(self, image: Image.Image, target: str) -> None:
         preview = ImageOps.contain(image.convert("RGBA"), (216, 216), Image.Resampling.LANCZOS)
@@ -1669,6 +2018,7 @@ class BlytheA4App(tk.Tk):
                 on_generate_request=lambda job_id, payload: self.after(
                     0, self._handle_portal_generate_request, job_id, payload
                 ),
+                on_selection_saved=self._notify_customer_selection_saved,
                 save_root=self.customer_portal_output_dir(),
             )
             local_url = self.customer_portal.start()
@@ -1705,6 +2055,11 @@ class BlytheA4App(tk.Tk):
     ) -> None:
         try:
             with tempfile.TemporaryDirectory(prefix="blythe_customer_remote_") as temp_dir:
+                reference_bytes = payload.get("_reference_image_bytes")
+                reference_image = None
+                if isinstance(reference_bytes, bytes):
+                    reference_image = Path(temp_dir) / "customer_reference.png"
+                    reference_image.write_bytes(reference_bytes)
                 _path, image = create_eye(
                     str(payload.get("notes") or ""),
                     Path(temp_dir),
@@ -1713,8 +2068,10 @@ class BlytheA4App(tk.Tk):
                     design=str(payload.get("design") or "อัตโนมัติ"),
                     color_primary=str(payload.get("primary") or "อัตโนมัติ"),
                     color_secondary=str(payload.get("secondary") or "อัตโนมัติ"),
+                    reference_image=reference_image,
                 )
-            portal.complete_generation(job_id, image, dict(payload))
+            metadata = {key: value for key, value in payload.items() if not key.startswith("_")}
+            portal.complete_generation(job_id, image, metadata)
             self.after(0, self.portal_status_var.set, "สร้างพรีวิวจากคำสั่งลูกค้าแล้ว")
         except Exception:
             portal.fail_generation(job_id)
@@ -1743,8 +2100,60 @@ class BlytheA4App(tk.Tk):
         if self.customer_portal is None or not self.customer_portal.is_running:
             return
         self.portal_url_var.set(url)
-        self.portal_status_var.set("ลิงก์สาธารณะพร้อม • กดปิดลิงก์เมื่อเลิกใช้งาน")
+        if self._last_ntfy_customer_url == url:
+            self.portal_status_var.set("ลิงก์สาธารณะพร้อม • ส่งไป ntfy แล้ว")
+            self._refresh_portal_controls()
+            return
+        self._last_ntfy_customer_url = url
+        self.portal_status_var.set("ลิงก์พร้อม • กำลังส่งแจ้งเตือนไป ntfy...")
         self._refresh_portal_controls()
+        threading.Thread(
+            target=self._send_customer_url_to_ntfy,
+            args=(url,),
+            daemon=True,
+        ).start()
+
+    def _send_customer_url_to_ntfy(self, url: str) -> None:
+        request = urllib.request.Request(
+            CUSTOMER_LINK_NTFY_URL,
+            data=f"ลิงก์ออกแบบตาสำหรับลูกค้า\n{url}".encode("utf-8"),
+            headers={"Title": "Blythe Eye customer link", "Click": url},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8):
+                pass
+        except Exception as exc:
+            self.after(
+                0,
+                self.portal_status_var.set,
+                f"ลิงก์พร้อมแล้ว แต่ส่ง ntfy ไม่สำเร็จ: {exc}",
+            )
+            return
+        self.after(0, self.portal_status_var.set, "ลิงก์สาธารณะพร้อม • ส่งไป ntfy แล้ว")
+
+    def _notify_customer_selection_saved(self, customer: str, folder: Path) -> None:
+        message = f"ลูกค้าบันทึกแบบตาแล้ว\nลูกค้า: {customer}\nรายการ: {folder.name}"
+        request = urllib.request.Request(
+            CUSTOMER_LINK_NTFY_URL,
+            data=message.encode("utf-8"),
+            headers={"Title": "Blythe Eye customer saved"},
+            method="POST",
+        )
+        threading.Thread(
+            target=self._post_customer_save_notification,
+            args=(request,),
+            name="blythe-customer-save-notification",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _post_customer_save_notification(request: urllib.request.Request) -> None:
+        try:
+            with urllib.request.urlopen(request, timeout=8):
+                pass
+        except Exception:
+            pass
 
     def _copy_customer_portal_link(self) -> None:
         url = self.portal_url_var.get().strip()
@@ -1768,6 +2177,9 @@ class BlytheA4App(tk.Tk):
         if self.customer_portal is not None:
             self.customer_portal.stop()
             self.customer_portal = None
+        if self.ai_reference_temp_path is not None:
+            self.ai_reference_temp_path.unlink(missing_ok=True)
+        self.custom_a4_temp.cleanup()
         self.destroy()
 
     def randomize_ai_options(self) -> None:
@@ -1790,9 +2202,19 @@ class BlytheA4App(tk.Tk):
         state = "disabled" if busy else "normal"
         self.ai_generate_button.configure(state=state)
         self.ai_preset_button.configure(state=state)
+        if hasattr(self, "ai_reference_button"):
+            self.ai_reference_button.configure(state=state)
+            self.ai_reference_paste_button.configure(state=state)
+            self.ai_reference_remove_button.configure(
+                state=("normal" if not busy and self.ai_reference_image else "disabled")
+            )
         self.ai_generate_preset_button.configure(
             state=("disabled" if busy or self.ai_collection_plan is None else "normal")
         )
+        if hasattr(self, "ai_edit_button"):
+            self.ai_edit_button.configure(
+                state=("normal" if not busy and self.ai_image_path is not None else "disabled")
+            )
 
     def generate_ai_eye(self) -> None:
         prompt = self.ai_single_prompt_text.get("1.0", "end").strip()
@@ -1801,11 +2223,14 @@ class BlytheA4App(tk.Tk):
         design = self.ai_design_var.get()
         color_primary = self.ai_primary_color_var.get()
         color_secondary = self.ai_secondary_color_var.get()
+        reference_image = self.ai_reference_image
         self._set_ai_busy(True)
-        self.ai_single_status_var.set("กำลังสร้าง 1 คู่...")
+        self.ai_single_status_var.set(
+            "กำลังปรับจากรูปอ้างอิง..." if reference_image else "กำลังสร้าง 1 คู่..."
+        )
         threading.Thread(
             target=self._generate_ai_eye_worker,
-            args=(prompt, style, background, design, color_primary, color_secondary),
+            args=(prompt, style, background, design, color_primary, color_secondary, reference_image),
             daemon=True,
         ).start()
 
@@ -1817,6 +2242,8 @@ class BlytheA4App(tk.Tk):
         design: str,
         color_primary: str,
         color_secondary: str,
+        reference_image: Path | None = None,
+        action: str = "สร้าง",
     ) -> None:
         try:
             path, image = create_eye(
@@ -1827,23 +2254,143 @@ class BlytheA4App(tk.Tk):
                 design=design,
                 color_primary=color_primary,
                 color_secondary=color_secondary,
+                reference_image=reference_image,
+                conversation_state=self.ai_single_conversation_state,
             )
         except Exception as exc:
-            self.after(0, self._finish_ai_eye_error, str(exc))
+            self.after(0, self._finish_ai_eye_error, str(exc), action)
             return
-        self.after(0, self._finish_ai_eye_success, path, image)
+        self.after(0, self._finish_ai_eye_success, path, image, action)
 
-    def _finish_ai_eye_success(self, path: Path, image: Image.Image) -> None:
+    def edit_ai_eye(self) -> None:
+        if self.ai_image_path is None or not self.ai_image_path.is_file():
+            self.ai_single_status_var.set("ยังไม่มีรูปล่าสุดให้แก้ไข")
+            return
+        prompt = self.ai_edit_prompt_text.get("1.0", "end").strip()
+        if not prompt:
+            self.ai_single_status_var.set("พิมพ์สิ่งที่ต้องการแก้ไขก่อน")
+            self.ai_edit_prompt_text.focus_set()
+            return
+        reference_image = self.ai_image_path
+        self._set_ai_busy(True)
+        self.ai_single_status_var.set("กำลังแก้ไขรูปล่าสุด...")
+        threading.Thread(
+            target=self._generate_ai_eye_worker,
+            args=(
+                prompt,
+                "อัตโนมัติ",
+                "โปร่งใส",
+                "อัตโนมัติ",
+                "อัตโนมัติ",
+                "อัตโนมัติ",
+                reference_image,
+                "แก้ไข",
+            ),
+            daemon=True,
+        ).start()
+
+    def _choose_ai_reference_image(self) -> None:
+        filename = filedialog.askopenfilename(
+            parent=self,
+            title="เลือกรูปตาอ้างอิง",
+            filetypes=[("รูปภาพ", "*.png *.jpg *.jpeg *.webp *.bmp"), ("ทุกไฟล์", "*.*")],
+        )
+        if not filename:
+            return
+        self._set_ai_reference_image(Path(filename))
+
+    def _set_ai_reference_image(self, reference_image: Path, temporary: bool = False) -> None:
+        try:
+            with Image.open(reference_image) as opened:
+                preview = opened.convert("RGBA").copy()
+        except Exception as exc:
+            if temporary:
+                reference_image.unlink(missing_ok=True)
+            messagebox.showerror("รูปอ้างอิง", f"เปิดรูปนี้ไม่ได้: {exc}", parent=self)
+            return
+        old_temporary = self.ai_reference_temp_path
+        self.ai_reference_image = reference_image
+        self.ai_reference_temp_path = reference_image if temporary else None
+        if old_temporary is not None and old_temporary != reference_image:
+            old_temporary.unlink(missing_ok=True)
+        self.ai_reference_name_var.set(reference_image.name)
+        self.ai_reference_remove_button.configure(state="normal")
+        self._set_ai_preview(preview, "single")
+        self.ai_single_status_var.set("แนบรูปแล้ว • พิมพ์สิ่งที่ต้องการเปลี่ยนได้")
+
+    def _on_ai_reference_paste_shortcut(self, event):
+        if self.current_page != "ai_single":
+            return None
+        focus = self.focus_get()
+        if isinstance(focus, (tk.Text, tk.Entry, tk.Spinbox, ttk.Entry, ttk.Combobox, ttk.Spinbox)):
+            return None
+        return self._paste_ai_reference_image(show_empty_message=False)
+
+    def _paste_ai_reference_image(self, show_empty_message: bool = True):
+        try:
+            clipboard = ImageGrab.grabclipboard()
+        except Exception as exc:
+            self.ai_single_status_var.set("อ่านรูปจากคลิปบอร์ดไม่ได้")
+            if show_empty_message:
+                messagebox.showerror("วางรูปอ้างอิง", str(exc), parent=self)
+            return "break"
+
+        if isinstance(clipboard, Image.Image):
+            with tempfile.NamedTemporaryFile(prefix="blythe_eye_ref_", suffix=".png", delete=False) as temp:
+                reference_image = Path(temp.name)
+            try:
+                clipboard.save(reference_image, format="PNG")
+            except Exception as exc:
+                reference_image.unlink(missing_ok=True)
+                self.ai_single_status_var.set("บันทึกรูปจากคลิปบอร์ดไม่ได้")
+                if show_empty_message:
+                    messagebox.showerror("วางรูปอ้างอิง", str(exc), parent=self)
+                return "break"
+            self._set_ai_reference_image(reference_image, temporary=True)
+            return "break"
+
+        if isinstance(clipboard, list) and clipboard:
+            self._set_ai_reference_image(Path(clipboard[0]))
+            return "break"
+
+        self.ai_single_status_var.set("คลิปบอร์ดยังไม่มีรูป • คัดลอกรูปหรือแคปหน้าจอก่อน")
+        if show_empty_message:
+            messagebox.showinfo(
+                "วางรูปอ้างอิง",
+                "ยังไม่พบรูปในคลิปบอร์ด\nคัดลอกรูปหรือแคปหน้าจอ แล้วกด “วางรูป” หรือ Ctrl+V",
+                parent=self,
+            )
+        return "break" if show_empty_message else None
+
+    def _clear_ai_reference_image(self) -> None:
+        self.ai_reference_image = None
+        if self.ai_reference_temp_path is not None:
+            self.ai_reference_temp_path.unlink(missing_ok=True)
+            self.ai_reference_temp_path = None
+        self.ai_reference_name_var.set("ยังไม่ได้แนบรูป")
+        self.ai_reference_remove_button.configure(state="disabled")
+        preview = (
+            self.ai_image
+            if self.ai_image is not None
+            else Image.new("RGBA", (240, 240), (255, 255, 255, 0))
+        )
+        self._set_ai_preview(preview, "single")
+
+    def _finish_ai_eye_success(self, path: Path, image: Image.Image, action: str = "สร้าง") -> None:
         self.ai_image_path = path
         self.ai_image = image
         self._set_ai_preview(image, "single")
-        self.ai_single_status_var.set(f"สร้างเสร็จ • เก็บไว้ใน AI_Eyes • {path.name}")
+        if action == "แก้ไข":
+            self.ai_edit_prompt_text.delete("1.0", "end")
+        self.ai_single_status_var.set(f"{action}เสร็จ • เก็บไว้ใน AI_Eyes • {path.name}")
         self._set_ai_busy(False)
 
-    def _finish_ai_eye_error(self, message: str) -> None:
-        self.ai_single_status_var.set("สร้าง 1 คู่ไม่สำเร็จ")
+    def _finish_ai_eye_error(self, message: str, action: str = "สร้าง 1 คู่") -> None:
+        status = "แก้ไขรูปล่าสุดไม่สำเร็จ" if action == "แก้ไข" else "สร้าง 1 คู่ไม่สำเร็จ"
+        title = "AI • แก้ไขรูปล่าสุด" if action == "แก้ไข" else "AI 1 คู่"
+        self.ai_single_status_var.set(status)
         self._set_ai_busy(False)
-        messagebox.showerror("AI 1 คู่", message)
+        messagebox.showerror(title, message)
 
     def _finish_ai_collection_error(self, message: str) -> None:
         self.ai_collection_status_var.set("สร้างชุด 16 คู่ไม่สำเร็จ")
@@ -2213,8 +2760,34 @@ class BlytheA4App(tk.Tk):
             command=lambda: browse_into(six_var, "เลือกโฟลเดอร์ Source 4×6"),
         ).grid(row=5, column=1, padx=(6, 0))
 
+        history_row = ttk.Frame(frame)
+        history_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        history_status_var = tk.StringVar(value="ไม่กดปุ่มนี้: AI 1 คู่จะทำต่อในประวัติเดิม")
+        ttk.Button(
+            history_row,
+            text="เริ่มประวัติ AI 1 คู่ใหม่",
+            command=lambda: self._start_new_ai_history(history_status_var),
+        ).pack(side="left")
+        ttk.Label(
+            history_row,
+            textvariable=history_status_var,
+            style="Muted.TLabel",
+        ).pack(side="left", padx=8)
+
+        update_row = ttk.Frame(frame)
+        update_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        update_status_var = tk.StringVar(value="ดาวน์โหลดเวอร์ชันล่าสุดจาก GitHub ได้จากปุ่มนี้")
+        ttk.Label(update_row, text="อัปเดตโปรแกรม", font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(update_row, textvariable=update_status_var, style="Muted.TLabel").pack(side="left", padx=8)
+        update_button = ttk.Button(
+            update_row,
+            text="อัปเดต",
+            command=lambda: self._update_program_from_github(dialog, update_status_var, update_button),
+        )
+        update_button.pack(side="right")
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
@@ -2249,6 +2822,112 @@ class BlytheA4App(tk.Tk):
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
 
+    def _update_program_from_github(
+        self,
+        dialog: tk.Toplevel,
+        status_var: tk.StringVar,
+        button: ttk.Button,
+    ) -> None:
+        if getattr(self, "_program_update_running", False):
+            return
+        if not messagebox.askyesno(
+            "อัปเดตโปรแกรม",
+            "ดาวน์โหลดไฟล์เวอร์ชันล่าสุดจาก GitHub เมื่อติดตั้งแล้วโปรแกรมจะปิดและเปิดใหม่ ต้องการดำเนินการหรือไม่?",
+            parent=dialog,
+        ):
+            return
+
+        self._program_update_running = True
+        button.configure(state="disabled")
+        status_var.set("กำลังดาวน์โหลดเวอร์ชันล่าสุด…")
+
+        def download() -> None:
+            work_dir = Path(tempfile.mkdtemp(prefix="blythe_update_"))
+            try:
+                archive = download_update_archive(work_dir)
+                source_dir = extract_update_archive(archive, work_dir)
+                self.after(0, lambda: self._finish_program_update(dialog, status_var, button, work_dir, source_dir, None))
+            except Exception as exc:
+                shutil.rmtree(work_dir, ignore_errors=True)
+                self.after(0, lambda error=str(exc): self._finish_program_update(
+                    dialog, status_var, button, work_dir, None, error
+                ))
+
+        threading.Thread(target=download, name="blythe-program-update", daemon=True).start()
+
+    def _finish_program_update(
+        self,
+        dialog: tk.Toplevel,
+        status_var: tk.StringVar,
+        button: ttk.Button,
+        work_dir: Path,
+        source_dir: Path | None,
+        error: str | None,
+    ) -> None:
+        self._program_update_running = False
+        if error or source_dir is None:
+            status_var.set("ดาวน์โหลดอัปเดตไม่สำเร็จ")
+            if dialog.winfo_exists():
+                button.configure(state="normal")
+                messagebox.showerror("อัปเดตไม่สำเร็จ", error or "ไม่พบไฟล์โปรแกรม", parent=dialog)
+            return
+        if not dialog.winfo_exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return
+        if not messagebox.askyesno(
+            "พร้อมติดตั้งอัปเดต",
+            "ดาวน์โหลดเสร็จแล้ว โปรแกรมจะปิดเพื่อติดตั้งและเปิดใหม่อัตโนมัติ ต้องการติดตั้งตอนนี้หรือไม่?",
+            parent=dialog,
+        ):
+            shutil.rmtree(work_dir, ignore_errors=True)
+            status_var.set("ยกเลิกการติดตั้งอัปเดต")
+            button.configure(state="normal")
+            return
+
+        app_root = Path(__file__).resolve().parents[1]
+        launcher = app_root / "เปิดโปรแกรม.bat"
+        updater = work_dir / "ติดตั้งอัปเดต.ps1"
+        updater.write_text(
+            "param([int]$ProcessId, [string]$StageRoot, [string]$InstallRoot, [string]$WorkDir, [string]$Launcher)\n"
+            "try {\n"
+            "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
+            "  Start-Sleep -Milliseconds 500\n"
+            "  Get-ChildItem -LiteralPath $StageRoot -Force | Copy-Item -Destination $InstallRoot -Recurse -Force\n"
+            "  Start-Process -FilePath $Launcher -WorkingDirectory $InstallRoot\n"
+            "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "} catch {\n"
+            "  Add-Type -AssemblyName PresentationFramework\n"
+            "  [System.Windows.MessageBox]::Show(('ติดตั้งอัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
+            "}\n",
+            encoding="utf-8-sig",
+        )
+        try:
+            subprocess.Popen(
+                [
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater),
+                    "-ProcessId", str(os.getpid()), "-StageRoot", str(source_dir),
+                    "-InstallRoot", str(app_root), "-WorkDir", str(work_dir), "-Launcher", str(launcher),
+                ],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                close_fds=True,
+            )
+        except OSError as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            status_var.set("เริ่มตัวติดตั้งอัปเดตไม่ได้")
+            button.configure(state="normal")
+            messagebox.showerror("อัปเดตไม่สำเร็จ", str(exc), parent=dialog)
+            return
+        dialog.destroy()
+        self.destroy()
+
+    def _start_new_ai_history(self, status_var: tk.StringVar) -> None:
+        if str(self.ai_generate_button["state"]) == "disabled":
+            status_var.set("รอให้การสร้างรูปปัจจุบันเสร็จก่อน")
+            return
+        self.ai_single_conversation_state.clear()
+        status_var.set("ครั้งถัดไปจะเริ่มประวัติใหม่ • ประวัติเก่ายังอยู่")
+        self.ai_single_status_var.set("ตั้งประวัติใหม่แล้ว • ใช้เมื่อกดสร้างครั้งถัดไป")
+
     def reload_assets(self) -> None:
         folder = Path(self.source_var.get())
         folder2 = second_source_folder(folder)
@@ -2277,7 +2956,7 @@ class BlytheA4App(tk.Tk):
         self.assets = OrderedDict()
         self.prepared_assets = OrderedDict()
         self.design_ids = []
-        group_ids: dict[int, list[str]] = {1: [], 2: []}
+        group_ids: dict[int, list[str]] = {1: [], 2: [], 3: []}
         for group, source_assets, prepared, raw_ids in (
             (1, source_assets_1, prepared_1, ids_1),
             (2, source_assets_2, prepared_2, ids_2),
@@ -2288,6 +2967,13 @@ class BlytheA4App(tk.Tk):
                 self.prepared_assets[key] = prepared[raw_id]
                 self.design_ids.append(key)
                 group_ids[group].append(key)
+
+        custom_items = discover_custom_a4_items(folder / CUSTOM_A4_DIR_NAME)
+        custom_items.update(self.custom_a4_items)
+        for custom_id, (source_path, chip_paths) in custom_items.items():
+            self.assets[custom_id] = source_path
+            self.prepared_assets[custom_id] = chip_paths
+            group_ids[3].append(custom_id)
 
         self.cache_stats = {
             "reused": list(stats_1.get("reused", [])) + list(stats_2.get("reused", [])),
@@ -2372,6 +3058,29 @@ class BlytheA4App(tk.Tk):
             for index, design_id in enumerate(group_ids[2]):
                 row_offset, col = divmod(index, columns)
                 add_design_button(design_id, row_cursor + row_offset, col)
+            row_cursor += (len(group_ids[2]) + columns - 1) // columns
+
+        self._build_custom_a4_crop_panel(row_cursor)
+        row_cursor += 1
+
+        if group_ids[3]:
+            ttk.Label(
+                self.number_grid,
+                text="คัสตอม",
+                font=("Segoe UI", 11, "bold"),
+                foreground=UI_ACCENT_DARK,
+            ).grid(
+                row=row_cursor,
+                column=0,
+                columnspan=columns,
+                sticky="w",
+                padx=4,
+                pady=(12, 6),
+            )
+            row_cursor += 1
+            for index, design_id in enumerate(group_ids[3]):
+                row_offset, col = divmod(index, columns)
+                add_design_button(design_id, row_cursor + row_offset, col)
 
         for col in range(columns):
             self.number_grid.columnconfigure(col, weight=1)
@@ -2382,6 +3091,9 @@ class BlytheA4App(tk.Tk):
         rebuilt = len(self.cache_stats.get("rebuilt", []))
         failed = len(self.cache_stats.get("failed", {}))
         cache_text = f"พร้อม {len(self.design_ids)} • เดิม {reused} • ทำใหม่ {rebuilt}"
+        custom_count = len(group_ids[3])
+        if custom_count:
+            cache_text += f" • คัสตอม {custom_count}"
         if failed:
             cache_text += f" • ผิดพลาด {failed}"
         self.cache_var.set(cache_text)
@@ -2832,6 +3544,299 @@ class BlytheA4App(tk.Tk):
         folder = self.output_dir()
         folder.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(folder)])
+
+    def add_custom_a4(self) -> None:
+        filename = filedialog.askopenfilename(
+            parent=self,
+            title="เลือกรูปตาคัสตอมสำหรับ A4",
+            filetypes=[("รูปภาพ", "*.png *.jpg *.jpeg *.webp *.bmp"), ("ทุกไฟล์", "*.*")],
+        )
+        if not filename:
+            return
+        self._open_custom_a4_path(Path(filename))
+
+    def _on_a4_file_drop(self, event) -> str:
+        try:
+            filenames = self.tk.splitlist(event.data)
+            image_path = next((Path(value) for value in filenames if Path(value).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}), None)
+        except (TypeError, ValueError, tk.TclError):
+            image_path = None
+        if image_path is not None:
+            self._open_custom_a4_path(image_path)
+        return "copy"
+
+    def _open_custom_a4_path(self, path: Path) -> None:
+        try:
+            with Image.open(path) as opened:
+                source = opened.convert("RGBA")
+                source.thumbnail((2400, 2400), Image.Resampling.LANCZOS)
+        except Exception as exc:
+            messagebox.showerror("เปิดรูปคัสตอมไม่ได้", str(exc), parent=self)
+            return
+        self.custom_a4_image = source
+        preview_source = source.copy()
+        preview_source.thumbnail((512, 512), Image.Resampling.BILINEAR)
+        self.custom_a4_preview_image = preview_source
+        self.custom_a4_crop_source = None
+        self.custom_a4_crop_preview_image = None
+        self.custom_a4_crop_mode = False
+        self.custom_a4_source_path = path
+        self.custom_a4_zoom.set(100)
+        self.custom_a4_pan_x = 0.0
+        self.custom_a4_pan_y = 0.0
+        self.custom_a4_crop_status.set(path.name)
+        self._update_custom_a4_crop_actions()
+        self._render_custom_a4_crop()
+
+    def _build_custom_a4_crop_panel(self, row: int) -> None:
+        panel = tk.Frame(
+            self.number_grid,
+            bg=UI_SURFACE,
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+            padx=12,
+            pady=10,
+        )
+        panel.grid(row=row, column=0, columnspan=6, sticky="ew", padx=3, pady=(14, 4))
+        ttk.Label(
+            panel,
+            text="ลากรูปมาครอปสำหรับ A4",
+            font=("Segoe UI", 10, "bold"),
+            foreground=UI_ACCENT_DARK,
+        ).pack()
+        ttk.Label(panel, textvariable=self.custom_a4_crop_status, style="Muted.TLabel").pack(pady=(2, 6))
+        crop = tk.Canvas(
+            panel,
+            width=252,
+            height=252,
+            bg=UI_SURFACE,
+            highlightthickness=3,
+            highlightbackground=UI_BORDER,
+            highlightcolor=UI_ACCENT,
+            cursor="hand2",
+        )
+        crop.pack()
+        crop.bind("<ButtonPress-1>", self._begin_custom_a4_pan)
+        crop.bind("<B1-Motion>", self._move_custom_a4_pan)
+        crop.bind("<ButtonRelease-1>", lambda _event: setattr(self, "custom_a4_pan_last", None))
+        crop.drop_target_register(DND_FILES)
+        crop.dnd_bind("<<Drop>>", self._on_a4_file_drop)
+        self.custom_a4_crop_canvas = crop
+        ttk.Label(panel, text="ลากรูปในกรอบเพื่อเลื่อนตำแหน่ง", style="Muted.TLabel").pack(pady=(4, 0))
+
+        self.custom_a4_zoom_scale = tk.Scale(
+            panel,
+            from_=50,
+            to=200,
+            resolution=5,
+            orient="horizontal",
+            variable=self.custom_a4_zoom,
+            command=lambda _value: self._render_custom_a4_crop(),
+            length=252,
+            showvalue=True,
+            bg=UI_SURFACE,
+            fg=UI_TEXT,
+            highlightthickness=0,
+            label="ย่อ / ขยาย ให้พอดีกรอบครอป",
+            state=("normal" if self.custom_a4_crop_mode else "disabled"),
+        )
+        self.custom_a4_zoom_scale.pack(pady=(4, 4))
+        actions = ttk.Frame(panel)
+        actions.pack()
+        ttk.Button(actions, text="เลือกภาพ", command=self.add_custom_a4).pack(side="left", padx=3)
+        direct_button = ttk.Button(
+            actions,
+            text="ส่งภาพเดิมเข้า A4",
+            command=lambda: self._apply_custom_a4_crop(persist=False, crop=False),
+            state=("normal" if self.custom_a4_image else "disabled"),
+        )
+        direct_button.pack(side="left", padx=3)
+        crop_toggle_button = ttk.Button(
+            actions,
+            text=("ยกเลิกครอป" if self.custom_a4_crop_mode else "ครอป / จัดตำแหน่ง"),
+            command=self._toggle_custom_a4_crop,
+            state=("normal" if self.custom_a4_image else "disabled"),
+        )
+        crop_toggle_button.pack(side="left", padx=3)
+        crop_button = ttk.Button(
+            actions,
+            text="ใช้ครอปเพิ่ม A4",
+            command=lambda: self._apply_custom_a4_crop(persist=False, crop=True),
+            state=("normal" if self.custom_a4_crop_mode else "disabled"),
+        )
+        crop_button.pack(side="left", padx=3)
+        save_button = ttk.Button(
+            actions,
+            text="บันทึกเป็นแบบที่หนึ่ง",
+            command=lambda: self._apply_custom_a4_crop(persist=True),
+            state=("normal" if self.custom_a4_image else "disabled"),
+        )
+        save_button.pack(side="left", padx=3)
+        self.custom_a4_crop_buttons = [direct_button, crop_toggle_button, crop_button, save_button]
+        self._update_custom_a4_crop_actions()
+        if self.custom_a4_image is not None:
+            self._render_custom_a4_crop()
+
+    def _render_custom_a4_crop(self) -> None:
+        canvas = self.custom_a4_crop_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        size = 246
+        if self.custom_a4_image is None:
+            canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER)
+            canvas.create_text(
+                size // 2,
+                size // 2,
+                text="ลากรูปมาวางในช่องนี้\n\nหรือคลิกเพื่อเลือกภาพ",
+                fill=UI_MUTED,
+                font=("Segoe UI", 10, "bold"),
+                justify="center",
+            )
+            return
+        try:
+            if self.custom_a4_crop_mode:
+                canvas.configure(bg="#9AA39E", highlightbackground="#69736D")
+                eye = make_custom_a4_crop_preview(
+                    self.custom_a4_crop_preview_image or self.custom_a4_image,
+                    size,
+                    zoom=self.custom_a4_zoom.get() / 100,
+                    pan_x=self.custom_a4_pan_x,
+                    pan_y=self.custom_a4_pan_y,
+                )
+                preview = Image.new("RGBA", eye.size, "#9AA39E")
+                preview.alpha_composite(eye)
+                preview.alpha_composite(make_custom_a4_crop_guide(size))
+            else:
+                canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER)
+                fitted = ImageOps.contain(
+                    self.custom_a4_preview_image or self.custom_a4_image,
+                    (size, size),
+                    Image.Resampling.BILINEAR,
+                )
+                preview = Image.new("RGBA", (size, size), "white")
+                preview.alpha_composite(fitted, ((size - fitted.width) // 2, (size - fitted.height) // 2))
+            self.custom_a4_crop_photo = ImageTk.PhotoImage(preview)
+            canvas.create_image(size // 2, size // 2, image=self.custom_a4_crop_photo)
+        except Exception as exc:
+            self.custom_a4_crop_status.set(f"แสดงรูปไม่ได้: {exc}")
+
+    def _update_custom_a4_crop_actions(self) -> None:
+        has_image = self.custom_a4_image is not None
+        if self.custom_a4_zoom_scale is not None:
+            self.custom_a4_zoom_scale.configure(state=("normal" if has_image and self.custom_a4_crop_mode else "disabled"))
+        for index, button in enumerate(self.custom_a4_crop_buttons):
+            enabled = has_image and (index != 2 or self.custom_a4_crop_mode)
+            button.configure(state=("normal" if enabled else "disabled"))
+        if len(self.custom_a4_crop_buttons) > 1:
+            self.custom_a4_crop_buttons[1].configure(text=("ยกเลิกครอป" if self.custom_a4_crop_mode else "ครอป / จัดตำแหน่ง"))
+
+    def _toggle_custom_a4_crop(self) -> None:
+        if self.custom_a4_image is None:
+            return
+        self.custom_a4_crop_mode = not self.custom_a4_crop_mode
+        if self.custom_a4_crop_mode:
+            crop_source = (
+                remove_outer_background(self.custom_a4_image)
+                if _has_uniform_edge_background(self.custom_a4_image)
+                else self.custom_a4_image
+            )
+            self.custom_a4_crop_source = trim_custom_a4_transparent_margin(crop_source)
+            preview_source = self.custom_a4_crop_source.copy()
+            preview_source.thumbnail((512, 512), Image.Resampling.BILINEAR)
+            self.custom_a4_crop_preview_image = preview_source
+            self.custom_a4_pan_x = self.custom_a4_pan_y = 0.0
+            self.custom_a4_zoom.set(100)
+            self.custom_a4_crop_status.set("โหมดครอป • ลากรูปเพื่อเลื่อน แล้วปรับซูมให้ตรงกรอบ")
+        else:
+            self.custom_a4_crop_source = None
+            self.custom_a4_crop_preview_image = None
+            self.custom_a4_crop_status.set(self.custom_a4_source_path.name if self.custom_a4_source_path else "")
+            self.custom_a4_pan_last = None
+        self._update_custom_a4_crop_actions()
+        self._render_custom_a4_crop()
+
+    def _begin_custom_a4_pan(self, event) -> None:
+        if self.custom_a4_image is None:
+            self.add_custom_a4()
+            return
+        if not self.custom_a4_crop_mode:
+            return
+        self.custom_a4_pan_last = (event.x, event.y)
+
+    def _move_custom_a4_pan(self, event) -> None:
+        if self.custom_a4_pan_last is None or self.custom_a4_crop_preview_image is None:
+            return
+        old_x, old_y = self.custom_a4_pan_last
+        zoom = max(0.25, min(self.custom_a4_zoom.get() / 100, 2.5))
+        source = self.custom_a4_crop_preview_image
+        if source.width >= source.height * 1.7:
+            source = source.crop((0, 0, source.width // 2, source.height))
+        scale = 246 * zoom / max(source.size)
+        span_x = max(1.0, abs(source.width * scale - 246) / 2)
+        span_y = max(1.0, abs(source.height * scale - 246) / 2)
+        self.custom_a4_pan_x = max(-1.0, min(1.0, self.custom_a4_pan_x + (event.x - old_x) / span_x))
+        self.custom_a4_pan_y = max(-1.0, min(1.0, self.custom_a4_pan_y + (event.y - old_y) / span_y))
+        self.custom_a4_pan_last = (event.x, event.y)
+        self._render_custom_a4_crop()
+
+    def _apply_custom_a4_crop(self, persist: bool, crop: bool | None = None) -> None:
+        if self.custom_a4_image is None or self.custom_a4_source_path is None:
+            return
+        try:
+            use_crop = self.custom_a4_crop_mode if crop is None else crop
+            if use_crop:
+                pair = make_custom_a4_pair(
+                    self.custom_a4_crop_source or self.custom_a4_image,
+                    diameter_to_pixels(DEFAULT_DIAMETER_MM),
+                    zoom=self.custom_a4_zoom.get() / 100,
+                    pan_x=self.custom_a4_pan_x,
+                    pan_y=self.custom_a4_pan_y,
+                )
+            else:
+                pair = make_custom_a4_pair_as_is(
+                    self.custom_a4_image,
+                    diameter_to_pixels(DEFAULT_DIAMETER_MM),
+                )
+            existing_numbers = [
+                int(key.split(":", 1)[1])
+                for key in self.assets
+                if key.startswith("custom:") and key.split(":", 1)[1].isdigit()
+            ]
+            self.custom_a4_counter = max([self.custom_a4_counter, *existing_numbers], default=0) + 1
+            custom_id = f"custom:{self.custom_a4_counter:03d}"
+            if persist:
+                library = Path(self.source_var.get()) / CUSTOM_A4_DIR_NAME
+                library.mkdir(parents=True, exist_ok=True)
+                paths = [library / f"custom_{self.custom_a4_counter:03d}_{index}.png" for index in (1, 2)]
+                temp_paths = [path.with_suffix(".tmp.png") for path in paths]
+                try:
+                    for eye, output in zip(pair, temp_paths):
+                        eye.save(output, format="PNG", dpi=(DPI, DPI))
+                    for temporary, output in zip(temp_paths, paths):
+                        temporary.replace(output)
+                except Exception:
+                    for output in (*temp_paths, *paths):
+                        output.unlink(missing_ok=True)
+                    raise
+            else:
+                paths = [Path(self.custom_a4_temp.name) / f"{custom_id.replace(':', '_')}_{index}.png" for index in (1, 2)]
+                for eye, output in zip(pair, paths):
+                    eye.save(output, format="PNG", dpi=(DPI, DPI))
+            old_selections = self.selections.copy()
+            old_history = list(self.selection_history)
+            self.custom_a4_items[custom_id] = (self.custom_a4_source_path, tuple(paths))
+            self.reload_assets()
+            self.selections = OrderedDict(
+                (key, count) for key, count in old_selections.items() if key in self.assets
+            )
+            self.selection_history = [key for key in old_history if key in self.assets]
+            self.refresh_selection_status()
+            self.select_and_add(custom_id)
+            action = "ครอปแล้ว" if use_crop else "ใช้ภาพเดิมแล้ว"
+            self.custom_a4_crop_status.set(f"{action}: {custom_id} — เพิ่มลงรายการ A4 แล้ว")
+        except Exception as exc:
+            messagebox.showerror("ครอปรูปไม่ได้", str(exc), parent=self)
 
     def generate(self) -> None:
         if not self.selections:

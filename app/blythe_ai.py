@@ -29,6 +29,10 @@ STYLE_PROMPTS = {
         "handmade BJD resin eye aesthetic, artisan painted iris beneath a glossy clear resin dome, "
         "glass-like optical depth, luminous reflections, fine layered radial texture"
     ),
+    "Celestial Glass Dome": (
+        "premium fantasy BJD glass-dome eye, miniature celestial storybook scene embedded inside a glossy resin iris, "
+        "iridescent pearl layers, luminous depth, glowing rim, delicate magical details, collectible artisan finish"
+    ),
     "แฟนตาซี": (
         "fantasy custom doll eye, jewel-like iris, magical color gradients, decorative radial motifs, "
         "premium collectible doll-eye design"
@@ -53,6 +57,10 @@ DESIGN_PROMPTS = {
     "กระจุด / Freckles": "fine organic iris freckles and pigment speckles with controlled spacing",
     "สองสี Split": "two-tone iris color layout blended cleanly through radial fibers",
     "Metallic Shimmer": "metallic shimmer accents embedded in layered radial iris texture",
+    "Celestial Storybook": (
+        "a tiny dreamy celestial diorama inside the iris with soft clouds, distant stars, a crescent moon, "
+        "delicate butterflies or flowers, sparkling dust, and layered glass-like depth; elegant and uncluttered"
+    ),
 }
 
 COLOR_PROMPTS = {
@@ -80,6 +88,7 @@ COLOR_PROMPTS = {
     "เหลืองครีม": "soft pastel butter yellow",
     "ฟ้าอมม่วงพาสเทล": "soft pastel periwinkle",
     "เขียวเสจพาสเทล": "soft muted pastel sage green",
+    "ออโรร่า / Celestial": "pearl aurora pastel blue, lavender, pink and champagne gold",
     "พาสเทลสุ่ม": "a random soft pastel color",
 }
 
@@ -128,11 +137,19 @@ def eye_prompt(
         )
         primary = "muted smoky " + primary
         secondary = "soft desaturated " + secondary
+    is_celestial = style == "Celestial Glass Dome" or design == "Celestial Storybook"
+    subject_rules = (
+        "Inside the iris, allow a refined miniature celestial storybook scene with clouds, stars, moon, "
+        "butterflies or flowers, while keeping everything contained within the circular eye. "
+        if is_celestial
+        else "No props, no scene, no objects outside the iris. "
+    )
     prompt = (
         "Create one square 1:1 Blythe doll eye-chip design. "
         "Single circular iris artwork only, front-facing, perfectly centered and symmetrical, "
         "full outer circle visible with generous clean margin on every side, no cropping, no perspective, "
-        "no eyelids, no sclera eyeball, no human face, no text, no watermark, no props, no scene. "
+        "no eyelids, no sclera eyeball, no human face, no text, no watermark. "
+        f"{subject_rules}"
         f"Style: {style_prompt}. Iris design: {design_prompt}. "
         f"Color palette: dominant {primary}, secondary accents {secondary}. "
         f"Background: {background_prompt}. "
@@ -421,6 +438,7 @@ def _create_eye_with_namespace(
     name_hint: str = "blythe_ai_eye",
     save_sidecar: bool = True,
     conversation_state: dict[str, str] | None = None,
+    reference_image: Path | None = None,
 ) -> tuple[Path, Image.Image]:
     generate_image = namespace.get("generate_image")
     if not callable(generate_image):
@@ -452,20 +470,56 @@ def _create_eye_with_namespace(
         if callable(save_story):
             client_globals["_save_story_conversation"] = lambda: None
     try:
-        result = generate_image(
-            eye_prompt(
+        edit_options = {}
+        if reference_image is not None:
+            reference_image = Path(reference_image)
+            if not reference_image.is_file():
+                raise FileNotFoundError(f"ไม่พบรูปอ้างอิง: {reference_image}")
+            encode_image = namespace.get("encode_image_b64")
+            if not callable(encode_image):
+                raise RuntimeError("SnapGen client has no encode_image_b64()")
+            edit_options = {
+                "is_edit": True,
+                "ref_images": [encode_image(str(reference_image))],
+            }
+            requested_changes = [user_prompt.strip()] if user_prompt.strip() else []
+            if style != "อัตโนมัติ":
+                requested_changes.append(f"Style: {STYLE_PROMPTS.get(style, style)}")
+            if design != "อัตโนมัติ":
+                requested_changes.append(f"Iris design: {DESIGN_PROMPTS.get(design, design)}")
+            if color_primary != "อัตโนมัติ":
+                requested_changes.append(
+                    f"Primary iris color: {COLOR_PROMPTS.get(color_primary, color_primary)}"
+                )
+            if color_secondary != "อัตโนมัติ":
+                requested_changes.append(
+                    f"Secondary iris color: {COLOR_PROMPTS.get(color_secondary, color_secondary)}"
+                )
+            prompt = (
+                "Edit the attached image as the visual reference. Preserve its eye design, "
+                "composition, circular shape, and all details the user did not ask to change. "
+                "Apply only the explicit requested changes. Keep the same eye unless a change is listed. "
+                "Return one finished square 1:1 eye image with the complete circular eye visible "
+                "and a transparent background. Requested changes: "
+                + ("; ".join(requested_changes) if requested_changes else "none; reproduce the reference faithfully")
+            )
+        else:
+            prompt = eye_prompt(
                 user_prompt,
                 style,
                 background,
                 design,
                 color_primary,
                 color_secondary,
-            ),
+            )
+        result = generate_image(
+            prompt,
             output_dir=str(output_dir),
             name_hint=name_hint,
             aspect_ratio="1:1",
             save_sidecar=save_sidecar,
             use_story_history=use_story_history,
+            **edit_options,
         )
         if use_story_history:
             conversation_state["conversation_id"] = str(story.get("conversation_id") or "")
@@ -523,6 +577,8 @@ def create_eye(
     design: str = "เส้นรัศมีธรรมชาติ",
     color_primary: str = "น้ำตาล",
     color_secondary: str = "ทอง",
+    reference_image: Path | None = None,
+    conversation_state: dict[str, str] | None = None,
 ) -> tuple[Path, Image.Image]:
     return _create_eye_with_namespace(
         _snapgen_namespace(),
@@ -534,6 +590,8 @@ def create_eye(
         color_primary,
         color_secondary,
         save_sidecar=False,
+        conversation_state=conversation_state,
+        reference_image=reference_image,
     )
 
 

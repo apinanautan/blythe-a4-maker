@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import json
 import os
 import random
@@ -24,14 +25,43 @@ from PIL import Image, ImageChops, ImageDraw, ImageOps
 from blythe_ai import COLOR_PROMPTS, DESIGN_PROMPTS, STYLE_PROMPTS
 
 
-PORTAL_MAX_BODY = 16 * 1024
+PORTAL_MAX_BODY = 8 * 1024 * 1024
 PORTAL_MAX_PREVIEW_BYTES = 1_800_000
+PORTAL_MAX_REFERENCE_BYTES = 5 * 1024 * 1024
 PORTAL_MAX_GENERATIONS = 50
 PORTAL_MIN_INTERVAL_SECONDS = 4.0
 
 
 def _json_bytes(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _decode_reference_image(value: object) -> bytes:
+    if not isinstance(value, str) or "," not in value:
+        raise ValueError("รูปอ้างอิงไม่ถูกต้อง")
+    header, encoded = value.split(",", 1)
+    if header not in {
+        "data:image/png;base64",
+        "data:image/jpeg;base64",
+        "data:image/webp;base64",
+    }:
+        raise ValueError("รองรับรูป PNG, JPG หรือ WebP เท่านั้น")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise ValueError("อ่านไฟล์รูปอ้างอิงไม่สำเร็จ") from exc
+    if not data or len(data) > PORTAL_MAX_REFERENCE_BYTES:
+        raise ValueError("รูปอ้างอิงต้องมีขนาดไม่เกิน 5 MB")
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format not in {"PNG", "JPEG", "WEBP"}:
+                raise ValueError("รองรับรูป PNG, JPG หรือ WebP เท่านั้น")
+            if image.width > 8192 or image.height > 8192 or image.width * image.height > 40_000_000:
+                raise ValueError("ขนาดรูปใหญ่เกินไป")
+            image.verify()
+    except (OSError, Image.DecompressionBombError) as exc:
+        raise ValueError("ไฟล์รูปอ้างอิงเสียหายหรือเปิดไม่ได้") from exc
+    return data
 
 
 def _png_preview(image: Image.Image) -> bytes:
@@ -176,6 +206,11 @@ PORTAL_HTML = r'''<!doctype html>
     .preview { min-height:250px; display:grid; place-items:center; background:repeating-conic-gradient(#f0f3f1 0 25%,#fff 0 50%) 50%/24px 24px; border-radius:12px; overflow:hidden; }
     .preview img { display:block; width:100%; max-height:58vh; object-fit:contain; user-select:none; -webkit-user-drag:none; }
     .hint { margin:10px 2px 0; color:var(--muted); font-size:12px; }
+    .reference-row { display:flex; gap:8px; align-items:center; margin-top:10px; }
+    .reference-row input { min-width:0; flex:1; }
+    #clear-reference { width:auto; flex:0 0 auto; background:#f2f7f4; color:var(--dark); border:1px solid var(--line); }
+    #edit-latest, #apply-edit { display:none; background:#e8f7ef; color:var(--dark); border:1px solid var(--line); margin-top:9px; }
+    #edit-form { margin-top:10px; }
     @media (max-width:460px) { main { padding:14px 10px 28px; } .grid { grid-template-columns:1fr; } h1 { font-size:20px; } }
   </style>
 </head>
@@ -193,7 +228,8 @@ PORTAL_HTML = r'''<!doctype html>
       <div><label for="secondary">สีรอง</label><select id="secondary"></select></div>
     </div>
     <div style="margin-top:10px"><label for="customer">ชื่อลูกค้า / เลขออเดอร์</label><input id="customer" maxlength="80" placeholder="เช่น ลูกค้า A หรือ ออเดอร์ 001"></div>
-    <div style="margin-top:10px"><label for="notes">รายละเอียดเพิ่มเติม (ไม่ใส่ก็ได้)</label><textarea id="notes" maxlength="500" placeholder="เช่น โทนน้ำเงินเข้ม ดูหรู มีประกายเล็กน้อย"></textarea></div>
+    <div style="margin-top:10px"><label for="notes">รายละเอียดเพิ่มเติม / สิ่งที่ต้องการแก้ไข</label><textarea id="notes" maxlength="500" placeholder="เช่น โทนน้ำเงินเข้ม ดูหรู หรือปรับตาดำให้ใหญ่ขึ้น"></textarea></div>
+    <div style="margin-top:10px"><label for="reference">แนบรูปตัวอย่าง (ถ้าต้องการ)</label><div class="reference-row"><input id="reference" type="file" accept="image/png,image/jpeg,image/webp"><button id="clear-reference" type="button">เอาออก</button></div><div class="hint" id="reference-status">เลือกไฟล์รูป หรือคัดลอกรูปแล้ววางในหน้านี้ได้ • ไม่เกิน 5 MB</div></div>
     <div class="actions"><button id="random" type="button">สุ่มทั้งหมด</button><button id="generate" type="button">สร้างพรีวิว</button></div>
     <button id="save" type="button" disabled>บันทึกชุดนี้เข้าฝั่งร้าน</button>
     <div class="status" id="status" aria-live="polite">พร้อมออกแบบ</div>
@@ -201,12 +237,15 @@ PORTAL_HTML = r'''<!doctype html>
   <section class="card">
     <h2 class="result-title">ตัวอย่างหน้าปก</h2>
     <div class="preview" id="cover-preview"><span class="hint">พรีวิวจะแสดงตรงนี้</span></div>
+    <button id="edit-latest" type="button" disabled>แก้ไขพรีวิวล่าสุดตามรายละเอียด</button>
+    <div id="edit-form" style="display:none"><label for="edit-notes">พิมพ์สิ่งที่ต้องการแก้ไขรูปนี้</label><textarea id="edit-notes" maxlength="500" placeholder="เช่น ขยายตาดำขึ้นเล็กน้อย"></textarea><button id="apply-edit" type="button" disabled>ยืนยันแก้ไขรูปนี้</button></div>
     <p class="hint">ลูกค้าจะเห็นเฉพาะหน้าปกตัวอย่าง เมื่อพอใจแล้วกดบันทึกชุดนี้ ข้อมูลจะส่งเข้าโฟลเดอร์ของร้าน</p>
   </section>
 </main>
 <script>
   const $ = id => document.getElementById(id);
-  const state = { options:null, busy:false, previewId:null, saved:false };
+  const state = { options:null, busy:false, previewId:null, saved:false, referenceData:null };
+  const MAX_REFERENCE_BYTES = 5 * 1024 * 1024;
   function fill(id, values, selected) {
     const el = $(id); el.replaceChildren();
     values.forEach(value => { const option=document.createElement('option'); option.value=value; option.textContent=value; el.appendChild(option); });
@@ -229,17 +268,32 @@ PORTAL_HTML = r'''<!doctype html>
     $('secondary').value = pick(state.options.color.filter(x => x !== 'อัตโนมัติ'));
     $('status').textContent = 'สุ่มตัวเลือกแล้ว';
   }
-  async function generate() {
+  async function readReference(file) {
+    if (!file) return;
+    state.referenceData=null;
+    if (!['image/png','image/jpeg','image/webp'].includes(file.type) || file.size > MAX_REFERENCE_BYTES) {
+      throw new Error('เลือกไฟล์ PNG, JPG หรือ WebP ขนาดไม่เกิน 5 MB');
+    }
+    state.referenceData = await new Promise((resolve,reject) => {
+      const reader=new FileReader(); reader.onload=()=>resolve(String(reader.result)); reader.onerror=()=>reject(new Error('อ่านไฟล์รูปไม่สำเร็จ')); reader.readAsDataURL(file);
+    });
+    $('reference-status').textContent='แนบแล้ว: '+file.name+' • รูปจะถูกส่งให้โปรแกรมหลักใช้เป็นภาพอ้างอิง';
+  }
+  async function generate(editLatest=false) {
     if (state.busy) return;
-    state.busy = true; state.saved=false; $('generate').disabled=true; $('random').disabled=true; $('save').disabled=true; $('status').textContent='ส่งคำสั่งให้โปรแกรมกำลังสร้าง…';
+    if (editLatest && !state.previewId) return;
+    state.busy = true; state.saved=false; $('generate').disabled=true; $('random').disabled=true; $('save').disabled=true; $('edit-latest').disabled=true; $('apply-edit').disabled=true; $('status').textContent='ส่งคำสั่งให้โปรแกรมกำลังสร้าง…';
     try {
-      const response = await fetch('./api/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({style:$('style').value,design:$('design').value,primary:$('primary').value,secondary:$('secondary').value,notes:$('notes').value})});
+      const response = await fetch('./api/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({style:$('style').value,design:$('design').value,primary:$('primary').value,secondary:$('secondary').value,notes:editLatest?$('edit-notes').value:$('notes').value,reference_image:editLatest?null:state.referenceData,edit_preview_id:editLatest?state.previewId:null})});
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'สร้างพรีวิวไม่สำเร็จ');
       state.previewId=null;
+      $('edit-latest').style.display='none';
+      $('edit-form').style.display='none';
+      $('cover-preview').replaceChildren(Object.assign(document.createElement('span'),{className:'hint',textContent:'กำลังสร้างพรีวิวใหม่…'}));
       await waitForResult(result.status_url);
     } catch (error) { $('status').textContent=error.message || 'เกิดข้อผิดพลาด'; }
-    finally { state.busy=false; $('generate').disabled=false; $('random').disabled=false; }
+    finally { state.busy=false; $('generate').disabled=false; $('random').disabled=false; $('edit-latest').disabled=!state.previewId; $('apply-edit').disabled=!state.previewId; }
   }
   async function waitForResult(statusUrl) {
     for (let attempt=0; attempt<180; attempt++) {
@@ -251,7 +305,7 @@ PORTAL_HTML = r'''<!doctype html>
       else if (result.status === 'ready') {
         state.previewId=result.preview_id;
         const cover = new Image(); cover.alt='ตัวอย่างบนหน้าปก'; cover.draggable=false; cover.src=result.cover_image_url+'?v='+Date.now();
-        $('cover-preview').replaceChildren(cover); $('save').disabled=false; $('status').textContent='สร้างหน้าปกตัวอย่างแล้ว เลือกบันทึกหรือสร้างใหม่ได้';
+        $('cover-preview').replaceChildren(cover); $('save').disabled=false; $('edit-notes').value=''; $('edit-form').style.display='none'; $('apply-edit').style.display='none'; $('edit-latest').disabled=false; $('edit-latest').style.display='block'; $('status').textContent='สร้างหน้าปกตัวอย่างแล้ว เลือกบันทึก แก้ไข หรือสร้างใหม่ได้';
         return;
       } else if (result.status === 'error') { throw new Error(result.error || 'โปรแกรมสร้างพรีวิวไม่สำเร็จ'); }
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -269,7 +323,13 @@ PORTAL_HTML = r'''<!doctype html>
     } catch (error) { $('save').disabled=false; $('status').textContent=error.message || 'บันทึกไม่สำเร็จ'; }
     finally { $('generate').disabled=false; $('random').disabled=false; }
   }
-  $('random').addEventListener('click', randomize); $('generate').addEventListener('click', generate); $('save').addEventListener('click', saveSelection);
+  $('random').addEventListener('click', randomize); $('generate').addEventListener('click', () => generate(false)); $('save').addEventListener('click', saveSelection);
+  $('edit-latest').addEventListener('click', () => { $('edit-latest').style.display='none'; $('edit-form').style.display='block'; $('edit-notes').focus(); });
+  $('edit-notes').addEventListener('input', () => { const ready=!!$('edit-notes').value.trim(); $('apply-edit').style.display=ready?'block':'none'; $('apply-edit').disabled=!ready; });
+  $('apply-edit').addEventListener('click', () => generate(true));
+  $('reference').addEventListener('change', event => readReference(event.target.files[0]).catch(error => $('reference-status').textContent=error.message));
+  $('clear-reference').addEventListener('click', () => { state.referenceData=null; $('reference').value=''; $('reference-status').textContent='เลือกไฟล์รูป หรือคัดลอกรูปแล้ววางในหน้านี้ได้ • ไม่เกิน 5 MB'; });
+  document.addEventListener('paste', event => { const item=Array.from(event.clipboardData?.items||[]).find(item=>item.type.startsWith('image/')); if(item){const file=item.getAsFile(); if(file) readReference(file).catch(error=>$('reference-status').textContent=error.message);} });
   document.addEventListener('contextmenu', event => event.preventDefault());
   document.addEventListener('dragstart', event => event.preventDefault());
   loadOptions().catch(error => $('status').textContent=error.message || 'โหลดหน้าไม่สำเร็จ');
@@ -286,9 +346,11 @@ class CustomerPortal:
         on_public_url: Callable[[str], None] | None = None,
         on_generate_request: Callable[[str, dict[str, object]], None] | None = None,
         save_root: Path | None = None,
+        on_selection_saved: Callable[[str, Path], None] | None = None,
     ) -> None:
         self.on_public_url = on_public_url
         self.on_generate_request = on_generate_request
+        self.on_selection_saved = on_selection_saved
         self.save_root = Path(save_root) if save_root else Path.cwd() / "ลูกค้าเลือกจากลิงก์"
         self.token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
@@ -425,6 +487,22 @@ class CustomerPortal:
                     self._previews.pop(preview_id, None)
 
     def request_generation(self, payload: dict[str, object], remote_ip: str) -> tuple[int, dict[str, object]]:
+        reference_bytes: bytes | None = None
+        reference_data = payload.get("reference_image")
+        if reference_data:
+            try:
+                reference_bytes = _decode_reference_image(reference_data)
+            except ValueError as exc:
+                return 400, {"error": str(exc)}
+        elif payload.get("edit_preview_id"):
+            preview_id = str(payload.get("edit_preview_id") or "").strip()
+            with self._lock:
+                bundle = self._previews.get(preview_id)
+                image_data = bundle.get("eye") if bundle else None
+            if not isinstance(image_data, bytes):
+                return 404, {"error": "พรีวิวที่จะแก้ไขหมดอายุแล้ว กรุณาสร้างใหม่"}
+            reference_bytes = image_data
+
         now = time.monotonic()
         with self._lock:
             if self._active_job_id is not None:
@@ -444,7 +522,9 @@ class CustomerPortal:
                 "secondary": _safe_choice(COLOR_PROMPTS, payload.get("secondary")),
                 "notes": str(payload.get("notes") or "").strip()[:500],
             }
-            self._jobs[job_id] = {"status": "queued", "payload": clean_payload}
+            if reference_bytes is not None:
+                clean_payload["_reference_image_bytes"] = reference_bytes
+            self._jobs[job_id] = {"status": "queued"}
             self._active_job_id = job_id
         self._discard_unsaved_previews()
         if self.on_generate_request:
@@ -521,6 +601,11 @@ class CustomerPortal:
                 json.dumps(record, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            if self.on_selection_saved:
+                try:
+                    self.on_selection_saved(customer_name, folder)
+                except Exception:
+                    pass
         except OSError:
             # The mobile page already received an immediate acknowledgement.
             # There is no temporary file to clean up when the write fails.
