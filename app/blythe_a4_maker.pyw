@@ -87,8 +87,9 @@ DATA_SYNC_STATE_FILE = SETTINGS_DIR / "data_sync_state.json"
 # Where a fresh install keeps the eye library downloaded from GitHub and the customer output.
 DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
+GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -3258,6 +3259,9 @@ class BlytheA4App(TkinterDnD.Tk):
             self._start_data_sync()
 
         ttk.Button(sync_row, text="ซิงค์ตอนนี้", command=sync_now).pack(side="right")
+        ttk.Button(sync_row, text="ดูรูปบน GitHub", command=lambda: webbrowser.open(GITHUB_DATA_URL)).pack(
+            side="right", padx=(0, 6)
+        )
         token_row = ttk.Frame(frame)
         token_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Label(token_row, text="GitHub token (ใช้ตอนอัปรูปขึ้น)", style="Muted.TLabel").pack(side="left")
@@ -3319,7 +3323,8 @@ class BlytheA4App(TkinterDnD.Tk):
             "2. Token name: ตั้งชื่ออะไรก็ได้ เช่น Blythe\n"
             "3. Expiration: เลือก No expiration (หรือ 1 ปี)\n"
             "4. Repository access: เลือก Only select repositories → blythe-a4-maker\n"
-            "5. Permissions → Repository permissions → Contents: Read and write\n"
+            "5. หัวข้อ Permissions กด + Add permissions → เลือก Contents\n"
+            "    แล้วเปลี่ยน Access จาก Read-only เป็น Read and write\n"
             "6. กด Generate token แล้วคัดลอกมาวางในช่อง GitHub token\n"
             "7. กด ซิงค์ตอนนี้ หรือ บันทึก\n\n"
             "อย่าส่ง token ให้คนอื่น เพราะใช้แก้ไฟล์ใน GitHub ของคุณได้",
