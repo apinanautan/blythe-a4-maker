@@ -68,6 +68,7 @@ CUSTOM_A4_DIR_NAME = "_custom_a4"
 UI_BG = "#F5FAF7"
 UI_SURFACE = "#FFFFFF"
 UI_ACCENT = "#2BA66A"
+CUSTOM_A4_CROP_PREVIEW_PX = 300
 UI_ACCENT_DARK = "#1E7E4E"
 UI_ACCENT_SOFT = "#E4F6EC"
 UI_TEXT = "#173D2B"
@@ -937,20 +938,22 @@ def make_custom_a4_crop_preview(
 
 def make_custom_a4_crop_guide(size_px: int) -> Image.Image:
     """Draw a fixed, centered circular crop guide over the movable source image."""
-    scale = 3
+    scale = 4
     size = max(1, int(size_px))
     hi_size = size * scale
-    guide = Image.new("RGBA", (hi_size, hi_size), (35, 45, 40, 132))
+    # Dim everything that will be cut away so the kept circle stands out.
+    guide = Image.new("RGBA", (hi_size, hi_size), (25, 32, 28, 175))
     draw = ImageDraw.Draw(guide)
     bounds = (0, 0, hi_size - 1, hi_size - 1)
-    draw.ellipse(bounds, fill=(35, 45, 40, 0))
-    # A dark halo keeps the crop edge visible over both bright and dark artwork.
-    draw.ellipse(bounds, outline=(20, 28, 24, 230), width=5 * scale)
+    draw.ellipse(bounds, fill=(0, 0, 0, 0))
+    # The white line sits exactly on the cut edge; the dark line just inside it
+    # keeps the edge readable over both bright and dark artwork.
+    draw.ellipse(bounds, outline=(255, 255, 255, 255), width=2 * scale)
     inset = 2 * scale
     draw.ellipse(
         (inset, inset, hi_size - 1 - inset, hi_size - 1 - inset),
-        outline=(255, 255, 255, 255),
-        width=2 * scale,
+        outline=(20, 28, 24, 200),
+        width=1 * scale,
     )
     return guide.resize((size, size), Image.Resampling.LANCZOS)
 
@@ -3873,8 +3876,8 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Label(panel, textvariable=self.custom_a4_crop_status, style="Muted.TLabel").pack(pady=(2, 6))
         crop = tk.Canvas(
             panel,
-            width=252,
-            height=252,
+            width=CUSTOM_A4_CROP_PREVIEW_PX,
+            height=CUSTOM_A4_CROP_PREVIEW_PX,
             bg=UI_SURFACE,
             highlightthickness=3,
             highlightbackground=UI_BORDER,
@@ -3898,7 +3901,7 @@ class BlytheA4App(TkinterDnD.Tk):
             orient="horizontal",
             variable=self.custom_a4_zoom,
             command=lambda _value: self._render_custom_a4_crop(),
-            length=252,
+            length=CUSTOM_A4_CROP_PREVIEW_PX,
             showvalue=True,
             bg=UI_SURFACE,
             fg=UI_TEXT,
@@ -3948,12 +3951,15 @@ class BlytheA4App(TkinterDnD.Tk):
         if canvas is None or not canvas.winfo_exists():
             return
         canvas.delete("all")
-        size = 246
+        size = CUSTOM_A4_CROP_PREVIEW_PX
+        # Tk canvas coordinates start under the highlight border, so offset by it
+        # or the preview is shifted up-left and no longer lines up with the frame.
+        inset = int(canvas.cget("highlightthickness")) + int(canvas.cget("borderwidth"))
         if self.custom_a4_image is None:
             canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER)
             canvas.create_text(
-                size // 2,
-                size // 2,
+                inset + size // 2,
+                inset + size // 2,
                 text="ลากรูปมาวางในช่องนี้\n\nหรือคลิกเพื่อเลือกภาพ",
                 fill=UI_MUTED,
                 font=("Segoe UI", 10, "bold"),
@@ -3983,7 +3989,7 @@ class BlytheA4App(TkinterDnD.Tk):
                 preview = Image.new("RGBA", (size, size), "white")
                 preview.alpha_composite(fitted, ((size - fitted.width) // 2, (size - fitted.height) // 2))
             self.custom_a4_crop_photo = ImageTk.PhotoImage(preview)
-            canvas.create_image(size // 2, size // 2, image=self.custom_a4_crop_photo)
+            canvas.create_image(inset, inset, image=self.custom_a4_crop_photo, anchor="nw")
         except Exception as exc:
             self.custom_a4_crop_status.set(f"แสดงรูปไม่ได้: {exc}")
 
@@ -4038,9 +4044,10 @@ class BlytheA4App(TkinterDnD.Tk):
         source = self.custom_a4_crop_preview_image
         if source.width >= source.height * 1.7:
             source = source.crop((0, 0, source.width // 2, source.height))
-        scale = 246 * zoom / max(source.size)
-        span_x = max(1.0, abs(source.width * scale - 246) / 2)
-        span_y = max(1.0, abs(source.height * scale - 246) / 2)
+        size = CUSTOM_A4_CROP_PREVIEW_PX
+        scale = size * zoom / max(source.size)
+        span_x = max(1.0, abs(source.width * scale - size) / 2)
+        span_y = max(1.0, abs(source.height * scale - size) / 2)
         self.custom_a4_pan_x = max(-1.0, min(1.0, self.custom_a4_pan_x + (event.x - old_x) / span_x))
         self.custom_a4_pan_y = max(-1.0, min(1.0, self.custom_a4_pan_y + (event.y - old_y) / span_y))
         self.custom_a4_pan_last = (event.x, event.y)
