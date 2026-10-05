@@ -297,3 +297,41 @@ def sync(folders: dict[str, Path], state_file: Path, token: str = "", client: Gi
             result.uploaded, result.deleted_remote = upload, delete_remote
             _save_state(state_file, state)
         return result
+
+
+@dataclass
+class FolderStatus:
+    local: int
+    remote: int
+    only_local: int  # waiting to upload (or deleted on GitHub)
+    only_remote: int  # waiting to download (or deleted here)
+    different: int  # same name, different content
+
+    @property
+    def in_sync(self) -> bool:
+        return not (self.only_local or self.only_remote or self.different)
+
+
+def compare(folders: dict[str, Path], state_file: Path, token: str = "", client: GitHubData | None = None) -> dict[str, FolderStatus]:
+    """Count files on this computer and on GitHub per folder, without changing anything."""
+    github = client or GitHubData(token)
+    remote = github.remote_files(github.head_sha())
+    try:
+        hash_cache = json.loads(state_file.with_name("data_sync_hashes.json").read_text(encoding="utf-8"))
+        if not isinstance(hash_cache, dict):
+            hash_cache = {}
+    except (OSError, ValueError):
+        hash_cache = {}
+    local, _paths, _large = scan_local(folders, hash_cache)
+    report: dict[str, FolderStatus] = {}
+    for prefix in folders:
+        here = {path: sha for path, sha in local.items() if path.startswith(prefix + "/")}
+        there = {path: sha for path, sha in remote.items() if path.startswith(prefix + "/")}
+        report[prefix] = FolderStatus(
+            local=len(here),
+            remote=len(there),
+            only_local=len(here.keys() - there.keys()),
+            only_remote=len(there.keys() - here.keys()),
+            different=sum(1 for path in here.keys() & there.keys() if here[path] != there[path]),
+        )
+    return report
