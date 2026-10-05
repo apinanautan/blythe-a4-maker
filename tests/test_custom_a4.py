@@ -20,6 +20,33 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_trash_restore_and_renumber(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "set1"
+            trash = Path(temp) / "trash"
+            folder.mkdir()
+            for name in ("64.png", "65.png", "65.psd", "66.png"):
+                (folder / name).write_text(name)
+
+            entry = _app.move_design_to_trash(folder, "65", trash)
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), ["64.png", "66.png"])
+            self.assertFalse(_app.design_files(folder, "65"))
+            self.assertEqual([item["stem"] for item in _app.list_trash(trash)], ["65"])
+
+            self.assertEqual(_app.restore_from_trash(entry, trash), "65")
+            self.assertEqual((folder / "65.psd").read_text(), "65.psd")
+            self.assertEqual(_app.list_trash(trash), [])
+
+            _app.renumber_design(folder, "64", "66", swap=True)
+            self.assertEqual((folder / "66.png").read_text(), "64.png")
+            self.assertEqual((folder / "64.png").read_text(), "66.png")
+            with self.assertRaises(FileExistsError):
+                _app.renumber_design(folder, "64", "65")
+
+            _app.move_design_to_trash(folder, "66", trash)
+            _app.purge_trash(trash_dir=trash)
+            self.assertEqual(_app.list_trash(trash), [])
+
     def test_design_file_can_be_placed_on_4x6_page(self):
         with tempfile.TemporaryDirectory() as temp:
             pair = Path(temp) / "64.png"
@@ -37,15 +64,17 @@ class CustomA4Tests(unittest.TestCase):
     def test_ai_image_is_added_as_next_number(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
-            Image.new("RGB", (40, 20), "white").save(folder / "9.png")
-            self.assertEqual(_app.save_image_into_set(Image.new("RGBA", (40, 20), "red"), folder), "10")
-            self.assertTrue((folder / "10.png").is_file())
+            for number in (1, 2, 3, 5):
+                Image.new("RGB", (40, 20), "white").save(folder / f"{number}.png")
+            self.assertEqual(_app.save_image_into_set(Image.new("RGBA", (40, 20), "red"), folder), "4")
+            self.assertTrue((folder / "4.png").is_file())
             self.assertFalse(any(path.name.startswith(".") for path in folder.iterdir()))
 
     def test_saved_custom_pair_becomes_next_number_in_set_one(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
-            Image.new("RGB", (40, 20), "white").save(folder / "63.png")
+            for number in range(1, 64):
+                Image.new("RGB", (40, 20), "white").save(folder / f"{number}.png")
             Image.new("RGB", (20, 20), "white").save(folder / "7.1.png")
             red = Image.new("RGBA", (20, 20), "red")
             blue = Image.new("RGBA", (20, 20), "blue")

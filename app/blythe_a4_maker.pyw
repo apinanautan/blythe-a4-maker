@@ -19,7 +19,7 @@ from functools import lru_cache
 import statistics
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from PIL import Image, ImageChops, ImageDraw, ImageGrab, ImageOps, ImageTk
@@ -84,12 +84,13 @@ DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 DATA_SYNC_STATE_FILE = SETTINGS_DIR / "data_sync_state.json"
+TRASH_DIR = SETTINGS_DIR / "trash"
 # Where a fresh install keeps the eye library downloaded from GitHub and the customer output.
 DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.1.11"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -549,9 +550,92 @@ def discover_custom_a4_items(folder: Path) -> OrderedDict[str, tuple[Path, tuple
 
 
 def next_design_number(folder: Path) -> int:
-    """The number after the highest whole-numbered design in a set folder."""
-    numbers = [int(key.split(".")[0]) for key in discover_assets(folder)]
-    return max(numbers, default=0) + 1
+    """The first free whole number in a set folder, so a deleted number gets reused first."""
+    used = {int(key.split(".")[0]) for key in discover_assets(folder)}
+    number = 1
+    while number in used:
+        number += 1
+    return number
+
+
+def design_files(folder: Path, stem: str) -> list[Path]:
+    """Every file of one design number (the same design may exist as .psd and .png)."""
+    if not folder.is_dir():
+        return []
+    return sorted(
+        path for path in folder.iterdir()
+        if path.is_file() and path.stem == stem and path.suffix.lower() in VALID_EXTENSIONS
+    )
+
+
+def move_design_to_trash(folder: Path, stem: str, trash_dir: Path = TRASH_DIR) -> str:
+    """Move one design's files into the trash so a wrong delete can be undone."""
+    files = design_files(folder, stem)
+    if not files:
+        raise FileNotFoundError(f"ไม่พบไฟล์เบอร์ {stem}")
+    entry_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    entry = trash_dir / entry_id
+    entry.mkdir(parents=True)
+    (entry / "meta.json").write_text(
+        json.dumps({"folder": str(folder), "stem": stem, "deleted_at": datetime.now().isoformat(timespec="seconds")},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    for path in files:
+        shutil.move(str(path), str(entry / path.name))
+    return entry_id
+
+
+def list_trash(trash_dir: Path = TRASH_DIR) -> list[dict]:
+    entries = []
+    if trash_dir.is_dir():
+        for entry in sorted(trash_dir.iterdir(), reverse=True):
+            try:
+                meta = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            meta["id"] = entry.name
+            entries.append(meta)
+    return entries
+
+
+def restore_from_trash(entry_id: str, trash_dir: Path = TRASH_DIR) -> str:
+    """Put a trashed design back. If its number was reused meanwhile, it gets the first free number."""
+    entry = trash_dir / entry_id
+    meta = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
+    folder = Path(meta["folder"])
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = meta["stem"] if not design_files(folder, meta["stem"]) else str(next_design_number(folder))
+    for path in entry.iterdir():
+        if path.name != "meta.json":
+            shutil.move(str(path), str(folder / f"{stem}{path.suffix}"))
+    shutil.rmtree(entry, ignore_errors=True)
+    return stem
+
+
+def purge_trash(entry_id: str | None = None, trash_dir: Path = TRASH_DIR) -> None:
+    """Delete one trashed design, or the whole trash, for good."""
+    target = trash_dir / entry_id if entry_id else trash_dir
+    shutil.rmtree(target, ignore_errors=True)
+
+
+def renumber_design(folder: Path, old_stem: str, new_stem: str, swap: bool = False) -> None:
+    """Give a design a new number. With swap, the design already at that number takes the old one."""
+    if not NUMBER_RE.fullmatch(new_stem):
+        raise ValueError("เบอร์ต้องเป็นตัวเลข เช่น 65 หรือ 7.1")
+    moving = design_files(folder, old_stem)
+    occupied = design_files(folder, new_stem)
+    if occupied and not swap:
+        raise FileExistsError(f"มีเบอร์ {new_stem} อยู่แล้ว")
+    staged = []
+    for path in moving:
+        temporary = path.with_name(f".renumber_{path.name}")
+        path.replace(temporary)
+        staged.append((temporary, folder / f"{new_stem}{path.suffix}"))
+    for path in occupied:
+        path.replace(folder / f"{old_stem}{path.suffix}")
+    for temporary, final in staged:
+        temporary.replace(final)
 
 
 def save_image_into_set(image: Image.Image, folder: Path) -> str:
@@ -3321,8 +3405,18 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Entry(token_row, textvariable=token_var, width=30, show="•").pack(side="left", padx=6)
         ttk.Button(token_row, text="วิธีสร้าง token", command=lambda: self._show_token_help(dialog)).pack(side="right")
 
+        trash_row = ttk.Frame(frame)
+        trash_row.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Label(trash_row, text="ถังขยะ", font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(
+            trash_row,
+            text=f"รูปที่ลบไป {len(list_trash())} รูป • กู้คืนหรือลบถาวรได้",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=8)
+        ttk.Button(trash_row, text="เปิดถังขยะ", command=lambda: self._open_trash(dialog)).pack(side="right")
+
         uninstall_row = ttk.Frame(frame)
-        uninstall_row.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        uninstall_row.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Label(uninstall_row, text="ถอนการติดตั้ง", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(
             uninstall_row,
@@ -3332,7 +3426,7 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(uninstall_row, text="ถอนการติดตั้ง", command=lambda: self._uninstall_program(dialog)).pack(side="right")
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=12, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
@@ -4482,6 +4576,8 @@ class BlytheA4App(TkinterDnD.Tk):
         menu.add_command(label="ส่งไปหน้า 4×6", command=lambda: self._send_design_to_4x6(design_id))
         menu.add_command(label="ส่งไปหน้า AI เป็นไฟล์แนบ", command=lambda: self._send_design_to_ai(design_id))
         menu.add_separator()
+        if not design_id.startswith("custom:"):
+            menu.add_command(label="เปลี่ยนเบอร์", command=lambda: self._renumber_design(design_id))
         menu.add_command(
             label=f"ลบเฉพาะรูปนี้ ({display_design_id(design_id)})",
             command=lambda: self._delete_custom_a4(design_id),
@@ -4594,23 +4690,129 @@ class BlytheA4App(TkinterDnD.Tk):
             self.custom_a4_crop_status.set(f"ลบ {display_design_id(design_id)} แล้ว • เรียงเลขใหม่ 01–{len(renamed):02d}")
             self._start_data_sync()
 
+    def _reload_keeping_selection(self, id_map: dict[str, str] | None = None) -> None:
+        id_map = id_map or {}
+        old_selections = self.selections.copy()
+        old_history = list(self.selection_history)
+        self.reload_assets()
+        self.selections = OrderedDict(
+            (id_map.get(key, key), count) for key, count in old_selections.items() if id_map.get(key, key) in self.assets
+        )
+        self.selection_history = [id_map.get(key, key) for key in old_history if id_map.get(key, key) in self.assets]
+        self.refresh_selection_status()
+
+    def _renumber_design(self, design_id: str) -> None:
+        path = self.assets.get(design_id)
+        if path is None:
+            return
+        old_stem = path.stem
+        new_stem = simpledialog.askstring(
+            "เปลี่ยนเบอร์", f"เปลี่ยนเบอร์ {old_stem} เป็นเบอร์อะไร?", initialvalue=old_stem, parent=self
+        )
+        if not new_stem or new_stem.strip() == old_stem:
+            return
+        new_stem = new_stem.strip()
+        group = design_id.split(":", 1)[0]
+        swap = False
+        if design_files(path.parent, new_stem):
+            if not messagebox.askyesno(
+                "เบอร์นี้มีอยู่แล้ว",
+                f"มีเบอร์ {new_stem} อยู่แล้ว\n\nสลับกันไหม? (เบอร์ {new_stem} เดิมจะกลายเป็นเบอร์ {old_stem})",
+                parent=self,
+            ):
+                return
+            swap = True
+        try:
+            renumber_design(path.parent, old_stem, new_stem, swap=swap)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("เปลี่ยนเบอร์ไม่ได้", str(exc), parent=self)
+            return
+        id_map = {design_id: f"{group}:{new_stem}"}
+        if swap:
+            id_map[f"{group}:{new_stem}"] = design_id
+        self._reload_keeping_selection(id_map)
+        self.cache_var.set(f"เปลี่ยนเบอร์ {old_stem} → {new_stem} แล้ว" + (" (สลับกัน)" if swap else ""))
+        self._start_data_sync()
+
+    def _open_trash(self, parent: tk.Toplevel) -> None:
+        window = tk.Toplevel(parent)
+        window.title("ถังขยะ")
+        window.transient(parent)
+        window.grab_set()
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="รูปที่ลบไป เลือกแล้วกดกู้คืน หรือลบถาวร", style="Muted.TLabel").pack(anchor="w")
+        listbox = tk.Listbox(frame, width=58, height=12, activestyle="none")
+        listbox.pack(fill="both", expand=True, pady=6)
+        source = Path(self.source_var.get())
+        names = {str(source): "แบบที่หนึ่ง", str(second_source_folder(source)): "แบบที่สอง"}
+        entries: list[dict] = []
+
+        def refresh() -> None:
+            entries[:] = list_trash()
+            listbox.delete(0, "end")
+            for item in entries:
+                when = item.get("deleted_at", "").replace("T", " ")
+                listbox.insert("end", f"เบอร์ {item.get('stem')}  •  {names.get(item.get('folder'), item.get('folder'))}  •  ลบเมื่อ {when}")
+            if not entries:
+                listbox.insert("end", "ถังขยะว่าง")
+
+        def selected() -> dict | None:
+            picked = listbox.curselection()
+            return entries[picked[0]] if picked and entries else None
+
+        def restore() -> None:
+            item = selected()
+            if item is None:
+                return
+            try:
+                stem = restore_from_trash(item["id"])
+            except (OSError, ValueError, KeyError) as exc:
+                messagebox.showerror("กู้คืนไม่ได้", str(exc), parent=window)
+                return
+            note = "" if stem == item.get("stem") else f" (เบอร์เดิมมีรูปอื่นแล้ว จึงได้เบอร์ {stem})"
+            messagebox.showinfo("กู้คืนแล้ว", f"กู้คืนเบอร์ {stem} แล้ว{note}", parent=window)
+            refresh()
+            self._reload_keeping_selection()
+            self._start_data_sync()
+
+        def purge_one() -> None:
+            item = selected()
+            if item is None:
+                return
+            if messagebox.askyesno("ลบถาวร", f"ลบเบอร์ {item.get('stem')} ทิ้งถาวร? กู้คืนไม่ได้อีก", icon="warning", parent=window):
+                purge_trash(item["id"])
+                refresh()
+
+        def purge_all() -> None:
+            if entries and messagebox.askyesno("ล้างถังขยะ", "ลบทุกรูปในถังขยะทิ้งถาวร? กู้คืนไม่ได้อีก", icon="warning", parent=window):
+                purge_trash()
+                refresh()
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="กู้คืน", command=restore).pack(side="left")
+        ttk.Button(buttons, text="ลบถาวร", command=purge_one).pack(side="left", padx=6)
+        ttk.Button(buttons, text="ล้างถังขยะ", command=purge_all).pack(side="left")
+        ttk.Button(buttons, text="ปิด", command=window.destroy).pack(side="right")
+        refresh()
+
     def _delete_set_design(self, design_id: str) -> None:
         path = self.assets.get(design_id)
         if path is None:
             return
         if not messagebox.askyesno(
             "ลบลายตา",
-            f"ลบเฉพาะลายตาเบอร์ {display_design_id(design_id)} ทิ้งถาวร?\n\n"
-            "เบอร์อื่นจะไม่เปลี่ยน (ลูกค้าที่จำเบอร์ไว้จะไม่สับสน) และไฟล์ใน GitHub จะถูกลบตามด้วย",
+            f"ลบเฉพาะลายตาเบอร์ {display_design_id(design_id)}?\n\n"
+            "รูปจะไปอยู่ในถังขยะ กู้คืนได้ที่ ตั้งค่า → ถังขยะ\n"
+            "เบอร์อื่นไม่เปลี่ยน และรูปจะหายจาก GitHub ด้วย จนกว่าจะกู้คืน",
             icon="warning",
             parent=self,
         ):
             return
         try:
             # Only this number: the same design saved as .psd/.png/... but never other numbers.
-            for sibling in path.parent.iterdir():
-                if sibling.is_file() and sibling.stem == path.stem and sibling.suffix.lower() in VALID_EXTENSIONS:
-                    sibling.unlink()
+            move_design_to_trash(path.parent, path.stem)
         except OSError as exc:
             messagebox.showerror("ลบไม่ได้", str(exc), parent=self)
             return
