@@ -72,6 +72,8 @@ UI_BG = "#F5FAF7"
 UI_SURFACE = "#FFFFFF"
 UI_ACCENT = "#2BA66A"
 CUSTOM_A4_CROP_PREVIEW_PX = 300
+CROP_WORKSPACE_MARGIN = 60  # room around the crop circle so the image and its handles stay visible
+CROP_ZOOM_MIN, CROP_ZOOM_MAX = 0.25, 2.5
 UI_ACCENT_DARK = "#1E7E4E"
 UI_ACCENT_SOFT = "#E4F6EC"
 UI_TEXT = "#173D2B"
@@ -101,7 +103,7 @@ COVER_FILE_RE = re.compile(r"cover_(\d+)__L(\d+)x(\d+)_R(\d+)x(\d+)_S(\d+)")
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -1433,6 +1435,62 @@ def make_custom_a4_crop_preview(
     return preview
 
 
+def crop_source_piece(image: Image.Image) -> Image.Image:
+    """The part of the image the crop works on: the left eye of a two-up file, else the whole image."""
+    return image.crop((0, 0, image.width // 2, image.height)) if image.width >= image.height * 1.7 else image
+
+
+def crop_view_rect(
+    src_w: int, src_h: int, size: int, zoom: float, pan_x: float, pan_y: float
+) -> tuple[int, int, int, int]:
+    """Where the image sits relative to the crop box (same maths as make_custom_a4_pair)."""
+    scale = max(CROP_ZOOM_MIN, min(float(zoom), CROP_ZOOM_MAX)) * size / max(src_w, src_h)
+    width, height = max(1, round(src_w * scale)), max(1, round(src_h * scale))
+    pan_x = max(-1.0, min(float(pan_x), 1.0))
+    pan_y = max(-1.0, min(float(pan_y), 1.0))
+    x = -round((width - size) * (1 - pan_x) / 2) if width > size else round((size - width) * (1 + pan_x) / 2)
+    y = -round((height - size) * (1 - pan_y) / 2) if height > size else round((size - height) * (1 + pan_y) / 2)
+    return x, y, x + width, y + height
+
+
+def pan_for_center(length: float, size: float, center: float) -> float:
+    """The pan value that puts the image centre at `center` (clamped so no gap opens or it stays inside)."""
+    if length > size:
+        pan = 1 - (length - 2 * center) / (length - size)
+    elif length < size:
+        pan = (2 * center - length) / (size - length) - 1
+    else:
+        pan = 0.0
+    return max(-1.0, min(1.0, pan))
+
+
+def render_crop_workspace(
+    image: Image.Image, size: int, margin: int, zoom: float, pan_x: float, pan_y: float
+) -> Image.Image:
+    """The image placed around the crop box, including the parts outside it, for the editor."""
+    source = crop_source_piece(image.convert("RGBA"))
+    x0, y0, x1, y1 = crop_view_rect(source.width, source.height, size, zoom, pan_x, pan_y)
+    resized = source.resize((x1 - x0, y1 - y0), Image.Resampling.BILINEAR)
+    side = size + 2 * margin
+    workspace = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    workspace.paste(resized, (margin + x0, margin + y0), resized)
+    return workspace
+
+
+def make_crop_workspace_guide(size_px: int, margin: int) -> Image.Image:
+    """Dim everything outside the crop circle (including the margin) and outline the cut edge."""
+    scale = 4
+    side = (size_px + 2 * margin) * scale
+    guide = Image.new("RGBA", (side, side), (25, 32, 28, 175))
+    draw = ImageDraw.Draw(guide)
+    start, end = margin * scale, (margin + size_px) * scale - 1
+    draw.ellipse((start, start, end, end), fill=(0, 0, 0, 0))
+    draw.ellipse((start, start, end, end), outline=(255, 255, 255, 255), width=2 * scale)
+    inset = 2 * scale
+    draw.ellipse((start + inset, start + inset, end - inset, end - inset), outline=(20, 28, 24, 200), width=scale)
+    return guide.resize((size_px + 2 * margin,) * 2, Image.Resampling.LANCZOS)
+
+
 def make_custom_a4_crop_guide(size_px: int) -> Image.Image:
     """Draw a fixed, centered circular crop guide over the movable source image."""
     scale = 4
@@ -2142,6 +2200,11 @@ class BlytheA4App(TkinterDnD.Tk):
         elif stage == 1:
             grab(self, "a4.png")
             self._show_page("crop")
+            if self.assets:
+                self._open_custom_a4_path(next(iter(self.assets.values())))
+                self._toggle_custom_a4_crop()
+                self.custom_a4_zoom.set(70)
+                self._render_custom_a4_crop()
             self.after(1500, self._ci_screenshot_tick, folder, started, 2)
         elif stage == 2:
             grab(self, "crop.png")
@@ -3607,6 +3670,9 @@ class BlytheA4App(TkinterDnD.Tk):
             self._refresh_orders()
 
     def _on_mousewheel(self, event) -> None:
+        if self.current_page == "crop":
+            self._wheel_crop_zoom(event)
+            return
         if self.current_page == "4x6":
             canvas = self.six_number_canvas
         elif self.current_page == "a4":
@@ -4864,10 +4930,11 @@ class BlytheA4App(TkinterDnD.Tk):
         panel.pack(fill="x", padx=3, pady=(4, 12))
         panel.columnconfigure(1, weight=1)
 
+        workspace = CUSTOM_A4_CROP_PREVIEW_PX + 2 * CROP_WORKSPACE_MARGIN
         crop = tk.Canvas(
             panel,
-            width=CUSTOM_A4_CROP_PREVIEW_PX,
-            height=CUSTOM_A4_CROP_PREVIEW_PX,
+            width=workspace,
+            height=workspace,
             bg=UI_SURFACE,
             highlightthickness=3,
             highlightbackground=UI_BORDER,
@@ -4878,6 +4945,7 @@ class BlytheA4App(TkinterDnD.Tk):
         crop.bind("<ButtonPress-1>", self._begin_custom_a4_pan)
         crop.bind("<B1-Motion>", self._move_custom_a4_pan)
         crop.bind("<ButtonRelease-1>", lambda _event: setattr(self, "custom_a4_pan_last", None))
+        crop.bind("<Motion>", self._crop_hover_cursor)
         crop.drop_target_register(DND_FILES)
         crop.dnd_bind("<<Drop>>", self._on_a4_file_drop)
         self.custom_a4_crop_canvas = crop
@@ -4914,8 +4982,8 @@ class BlytheA4App(TkinterDnD.Tk):
         self.custom_a4_crop_toggle_button.pack(fill="x")
         self.custom_a4_zoom_scale = tk.Scale(
             adjust,
-            from_=50,
-            to=200,
+            from_=int(CROP_ZOOM_MIN * 100),
+            to=int(CROP_ZOOM_MAX * 100),
             resolution=5,
             orient="horizontal",
             variable=self.custom_a4_zoom,
@@ -4925,7 +4993,7 @@ class BlytheA4App(TkinterDnD.Tk):
             fg=UI_TEXT,
             troughcolor=UI_ACCENT_SOFT,
             highlightthickness=0,
-            label="ซูม (ลากรูปในกรอบเพื่อเลื่อน)",
+            label="ซูม • หรือลากมุม/ขอบของรูป • หมุนล้อเมาส์",
         )
         self.custom_a4_zoom_scale.pack(fill="x", pady=(4, 0))
 
@@ -4974,20 +5042,54 @@ class BlytheA4App(TkinterDnD.Tk):
         if self.custom_a4_image is not None:
             self._render_custom_a4_crop()
 
+    def _crop_geometry(self) -> tuple[int, int, int, tuple[int, int, int, int]] | None:
+        """(inset, margin, size, image rect in canvas coordinates) while cropping, else None."""
+        canvas = self.custom_a4_crop_canvas
+        source = self.custom_a4_crop_preview_image
+        if canvas is None or source is None or not self.custom_a4_crop_mode:
+            return None
+        piece = crop_source_piece(source)
+        size, margin = CUSTOM_A4_CROP_PREVIEW_PX, CROP_WORKSPACE_MARGIN
+        inset = int(canvas.cget("highlightthickness")) + int(canvas.cget("borderwidth"))
+        x0, y0, x1, y1 = crop_view_rect(
+            piece.width, piece.height, size, self.custom_a4_zoom.get() / 100, self.custom_a4_pan_x, self.custom_a4_pan_y
+        )
+        offset = inset + margin
+        return inset, margin, size, (x0 + offset, y0 + offset, x1 + offset, y1 + offset)
+
+    def _crop_handles(self) -> list[tuple[str, float, float]]:
+        geometry = self._crop_geometry()
+        if geometry is None:
+            return []
+        inset, margin, size, (x0, y0, x1, y1) = geometry
+        low, high = inset + 4, inset + size + 2 * margin - 4
+        mid_x, mid_y = (x0 + x1) / 2, (y0 + y1) / 2
+
+        def clamp(value: float) -> float:
+            return max(low, min(high, value))
+
+        return [
+            ("corner", clamp(x0), clamp(y0)), ("corner", clamp(x1), clamp(y0)),
+            ("corner", clamp(x0), clamp(y1)), ("corner", clamp(x1), clamp(y1)),
+            ("h", clamp(x0), clamp(mid_y)), ("h", clamp(x1), clamp(mid_y)),
+            ("v", clamp(mid_x), clamp(y0)), ("v", clamp(mid_x), clamp(y1)),
+        ]
+
     def _render_custom_a4_crop(self) -> None:
         canvas = self.custom_a4_crop_canvas
         if canvas is None or not canvas.winfo_exists():
             return
         canvas.delete("all")
-        size = CUSTOM_A4_CROP_PREVIEW_PX
+        size, margin = CUSTOM_A4_CROP_PREVIEW_PX, CROP_WORKSPACE_MARGIN
+        side = size + 2 * margin
         # Tk canvas coordinates start under the highlight border, so offset by it
         # or the preview is shifted up-left and no longer lines up with the frame.
         inset = int(canvas.cget("highlightthickness")) + int(canvas.cget("borderwidth"))
         if self.custom_a4_image is None:
-            canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER)
+            canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER, cursor="hand2")
             canvas.create_text(
-                inset + size // 2,
-                inset + size // 2,
+                inset + side // 2,
+                inset + side // 2,
                 text="ลากรูปมาวางในช่องนี้\n\nหรือคลิกเพื่อเลือกภาพ",
                 fill=UI_MUTED,
                 font=("Segoe UI", 10, "bold"),
@@ -4997,27 +5099,40 @@ class BlytheA4App(TkinterDnD.Tk):
         try:
             if self.custom_a4_crop_mode:
                 canvas.configure(bg="#9AA39E", highlightbackground="#69736D")
-                eye = make_custom_a4_crop_preview(
-                    self.custom_a4_crop_preview_image or self.custom_a4_image,
-                    size,
-                    zoom=self.custom_a4_zoom.get() / 100,
-                    pan_x=self.custom_a4_pan_x,
-                    pan_y=self.custom_a4_pan_y,
+                preview = Image.new("RGBA", (side, side), "#9AA39E")
+                preview.alpha_composite(
+                    render_crop_workspace(
+                        self.custom_a4_crop_preview_image or self.custom_a4_image,
+                        size,
+                        margin,
+                        self.custom_a4_zoom.get() / 100,
+                        self.custom_a4_pan_x,
+                        self.custom_a4_pan_y,
+                    )
                 )
-                preview = Image.new("RGBA", eye.size, "#9AA39E")
-                preview.alpha_composite(eye)
-                preview.alpha_composite(make_custom_a4_crop_guide(size))
+                preview.alpha_composite(make_crop_workspace_guide(size, margin))
             else:
-                canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER)
+                canvas.configure(bg=UI_SURFACE, highlightbackground=UI_BORDER, cursor="hand2")
                 fitted = ImageOps.contain(
                     self.custom_a4_preview_image or self.custom_a4_image,
-                    (size, size),
+                    (side, side),
                     Image.Resampling.BILINEAR,
                 )
-                preview = Image.new("RGBA", (size, size), "white")
-                preview.alpha_composite(fitted, ((size - fitted.width) // 2, (size - fitted.height) // 2))
+                preview = Image.new("RGBA", (side, side), "white")
+                preview.alpha_composite(fitted, ((side - fitted.width) // 2, (side - fitted.height) // 2))
             self.custom_a4_crop_photo = ImageTk.PhotoImage(preview)
             canvas.create_image(inset, inset, image=self.custom_a4_crop_photo, anchor="nw")
+            geometry = self._crop_geometry()
+            if geometry is not None:
+                _inset, _margin, _size, (x0, y0, x1, y1) = geometry
+                canvas.create_rectangle(x0, y0, x1, y1, outline="white", dash=(4, 3))
+                for _kind, hx, hy in self._crop_handles():
+                    canvas.create_rectangle(hx - 5, hy - 5, hx + 5, hy + 5, fill="white", outline=UI_ACCENT_DARK, width=2)
+            else:
+                canvas.create_text(
+                    inset + side // 2, inset + side - 14, text="คลิกที่รูปเพื่อเริ่มครอป",
+                    fill=UI_MUTED, font=("Segoe UI", 9, "bold"),
+                )
         except Exception as exc:
             self.custom_a4_crop_status.set(f"แสดงรูปไม่ได้: {exc}")
 
@@ -5059,30 +5174,97 @@ class BlytheA4App(TkinterDnD.Tk):
         self._update_custom_a4_crop_actions()
         self._render_custom_a4_crop()
 
+    def _hit_crop_handle(self, x: float, y: float) -> str | None:
+        for kind, hx, hy in self._crop_handles():
+            if abs(x - hx) <= 9 and abs(y - hy) <= 9:
+                return kind
+        return None
+
+    def _crop_hover_cursor(self, event) -> None:
+        canvas = self.custom_a4_crop_canvas
+        if canvas is None or self.custom_a4_pan_last is not None:
+            return
+        geometry = self._crop_geometry()
+        if geometry is None:
+            canvas.configure(cursor="hand2")
+            return
+        kind = self._hit_crop_handle(event.x, event.y)
+        _inset, _margin, _size, (x0, y0, x1, y1) = geometry
+        if kind == "h":
+            canvas.configure(cursor="sb_h_double_arrow")
+        elif kind == "v":
+            canvas.configure(cursor="sb_v_double_arrow")
+        elif kind == "corner":
+            canvas.configure(cursor="sizing")
+        else:
+            canvas.configure(cursor="fleur" if x0 <= event.x <= x1 and y0 <= event.y <= y1 else "arrow")
+
+    def _set_crop_zoom_keep_center(self, zoom: float, center: tuple[float, float]) -> None:
+        """Change the zoom while keeping the image centre at `center` (canvas coordinates)."""
+        geometry = self._crop_geometry()
+        source = self.custom_a4_crop_preview_image
+        if geometry is None or source is None:
+            return
+        inset, margin, size, _rect = geometry
+        zoom = max(CROP_ZOOM_MIN, min(CROP_ZOOM_MAX, zoom))
+        self.custom_a4_zoom.set(round(zoom * 100))
+        piece = crop_source_piece(source)
+        x0, y0, x1, y1 = crop_view_rect(piece.width, piece.height, size, self.custom_a4_zoom.get() / 100, 0, 0)
+        offset = inset + margin
+        self.custom_a4_pan_x = pan_for_center(x1 - x0, size, center[0] - offset)
+        self.custom_a4_pan_y = pan_for_center(y1 - y0, size, center[1] - offset)
+        self._render_custom_a4_crop()
+
     def _begin_custom_a4_pan(self, event) -> None:
         if self.custom_a4_image is None:
             self.add_custom_a4()
             return
         if not self.custom_a4_crop_mode:
+            self._toggle_custom_a4_crop()  # clicking the picture starts cropping
             return
+        geometry = self._crop_geometry()
+        if geometry is None:
+            return
+        _inset, _margin, _size, (x0, y0, x1, y1) = geometry
         self.custom_a4_pan_last = (event.x, event.y)
+        self._crop_drag = {
+            "kind": self._hit_crop_handle(event.x, event.y) or "move",
+            "zoom": self.custom_a4_zoom.get() / 100,
+            "center": ((x0 + x1) / 2, (y0 + y1) / 2),
+            "half": (max(1.0, (x1 - x0) / 2), max(1.0, (y1 - y0) / 2)),
+        }
 
     def _move_custom_a4_pan(self, event) -> None:
-        if self.custom_a4_pan_last is None or self.custom_a4_crop_preview_image is None:
+        drag = getattr(self, "_crop_drag", None)
+        if self.custom_a4_pan_last is None or drag is None or self.custom_a4_crop_preview_image is None:
             return
-        old_x, old_y = self.custom_a4_pan_last
-        zoom = max(0.25, min(self.custom_a4_zoom.get() / 100, 2.5))
-        source = self.custom_a4_crop_preview_image
-        if source.width >= source.height * 1.7:
-            source = source.crop((0, 0, source.width // 2, source.height))
-        size = CUSTOM_A4_CROP_PREVIEW_PX
-        scale = size * zoom / max(source.size)
-        span_x = max(1.0, abs(source.width * scale - size) / 2)
-        span_y = max(1.0, abs(source.height * scale - size) / 2)
-        self.custom_a4_pan_x = max(-1.0, min(1.0, self.custom_a4_pan_x + (event.x - old_x) / span_x))
-        self.custom_a4_pan_y = max(-1.0, min(1.0, self.custom_a4_pan_y + (event.y - old_y) / span_y))
-        self.custom_a4_pan_last = (event.x, event.y)
-        self._render_custom_a4_crop()
+        cx, cy = drag["center"]
+        half_w, half_h = drag["half"]
+        if drag["kind"] == "move":
+            old_x, old_y = self.custom_a4_pan_last
+            geometry = self._crop_geometry()
+            if geometry is None:
+                return
+            _inset, _margin, _size, (x0, y0, x1, y1) = geometry
+            center = ((x0 + x1) / 2 + event.x - old_x, (y0 + y1) / 2 + event.y - old_y)
+            self.custom_a4_pan_last = (event.x, event.y)
+            self._set_crop_zoom_keep_center(self.custom_a4_zoom.get() / 100, center)
+            return
+        if drag["kind"] == "h":
+            ratio = abs(event.x - cx) / half_w
+        elif drag["kind"] == "v":
+            ratio = abs(event.y - cy) / half_h
+        else:
+            ratio = max(abs(event.x - cx) / half_w, abs(event.y - cy) / half_h)
+        self._set_crop_zoom_keep_center(drag["zoom"] * max(0.05, ratio), (cx, cy))
+
+    def _wheel_crop_zoom(self, event) -> None:
+        geometry = self._crop_geometry()
+        if geometry is None:
+            return
+        _inset, _margin, _size, (x0, y0, x1, y1) = geometry
+        factor = 1.1 ** (event.delta / 120)
+        self._set_crop_zoom_keep_center(self.custom_a4_zoom.get() / 100 * factor, ((x0 + x1) / 2, (y0 + y1) / 2))
 
     def _show_custom_a4_menu(self, event, design_id: str) -> None:
         menu = tk.Menu(self, tearoff=False)

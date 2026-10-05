@@ -21,6 +21,27 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_crop_editor_geometry_matches_the_real_crop(self):
+        # The editor rectangle must sit exactly where make_custom_a4_crop_preview draws the image.
+        source = Image.new("RGBA", (400, 300), (255, 0, 0, 255))
+        for zoom, pan_x, pan_y in ((1.0, 0, 0), (1.6, 0.5, -0.3), (0.6, -0.8, 0.4)):
+            x0, y0, x1, y1 = _app.crop_view_rect(400, 300, 300, zoom, pan_x, pan_y)
+            preview = _app.make_custom_a4_crop_preview(source, 300, zoom, pan_x, pan_y)
+            box = preview.getchannel("A").getbbox()
+            self.assertEqual(box, (max(0, x0), max(0, y0), min(300, x1), min(300, y1)))
+            workspace = _app.render_crop_workspace(source, 300, 60, zoom, pan_x, pan_y)
+            self.assertEqual(workspace.getchannel("A").getbbox(),
+                             (max(0, x0 + 60), max(0, y0 + 60), min(420, x1 + 60), min(420, y1 + 60)))
+
+    def test_pan_for_center_round_trips(self):
+        for length, center in ((450, 120), (450, 180), (200, 110), (200, 190)):
+            pan = _app.pan_for_center(length, 300, center)
+            x0, _y0, x1, _y1 = _app.crop_view_rect(length, length, 300, length / 300, pan, 0)
+            self.assertLessEqual(abs((x0 + x1) / 2 - center), 1)
+        # Clamped: a big image cannot leave a gap, a small one cannot leave the box.
+        self.assertEqual(_app.pan_for_center(450, 300, 500), 1.0)
+        self.assertEqual(_app.pan_for_center(200, 300, -50), -1.0)
+
     def test_ai_cover_eyes_are_found_and_saved_in_the_name(self):
         cover = Image.new("RGB", (1000, 1000), (240, 200, 190))
         draw = ImageDraw.Draw(cover)
