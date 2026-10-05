@@ -31,6 +31,7 @@ python -m PyInstaller `
     --collect-all tkinterdnd2 `
     --hidden-import blythe_ai `
     --hidden-import customer_portal `
+    --hidden-import data_sync `
     --workpath $workDirectory `
     --distpath $releaseDirectory `
     "app\blythe_a4_maker.pyw"
