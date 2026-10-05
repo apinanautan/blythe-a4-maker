@@ -45,6 +45,25 @@ class CustomA4Tests(unittest.TestCase):
                 _app.extract_update_archive(unsafe_archive, folder / "unsafe")
             self.assertFalse((folder / "outside.txt").exists())
 
+    def test_first_run_asset_zip_extracts_only_cover_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            archive = folder / "assets.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("cover_assets/doll_cover_base.png", b"base")
+                bundle.writestr("cover_assets/doll_cover_overlay.png", b"overlay")
+                bundle.writestr("cover_assets/templates_gpt_blank/manifest.json", b"[]")
+            destination = folder / "staged"
+            _app.extract_cover_asset_archive(archive, destination)
+            self.assertEqual((destination / "cover_assets" / "templates_gpt_blank" / "manifest.json").read_bytes(), b"[]")
+
+            unsafe = folder / "unsafe_assets.zip"
+            with zipfile.ZipFile(unsafe, "w") as bundle:
+                bundle.writestr("cover_assets/../../outside.txt", b"unsafe")
+            with self.assertRaises(ValueError):
+                _app.extract_cover_asset_archive(unsafe, folder / "unsafe")
+            self.assertFalse((folder / "outside.txt").exists())
+
     def test_saved_custom_pairs_are_loaded_into_the_a4_library(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

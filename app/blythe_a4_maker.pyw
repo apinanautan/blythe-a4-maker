@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import json
+import hashlib
 import os
 import random
 import shutil
@@ -80,6 +81,11 @@ DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
+APP_VERSION = "1.1.0"
+APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
+APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
+APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
+APP_RELEASE_ASSETS_DIR = SETTINGS_DIR / "release_assets"
 
 COVER_CANVAS_SIZE = 1000
 COVER_EYE_SIZE = 195
@@ -92,10 +98,17 @@ def app_resource_path(*parts: str) -> Path:
     candidates: list[Path] = []
     if hasattr(sys, "_MEIPASS"):
         candidates.append(Path(sys._MEIPASS).joinpath(*parts))
+    if getattr(sys, "frozen", False) and parts and parts[0] == "cover_assets":
+        candidates.append(APP_RELEASE_ASSETS_DIR.joinpath(*parts))
     if getattr(sys, "frozen", False):
         candidates.append(Path(sys.executable).resolve().parent.joinpath(*parts))
     candidates.append(Path(__file__).resolve().parent.joinpath(*parts))
-    return next((path for path in candidates if path.exists()), candidates[-1])
+    existing = next((path for path in candidates if path.exists()), None)
+    if existing is not None:
+        return existing
+    if getattr(sys, "frozen", False) and parts and parts[0] == "cover_assets":
+        return APP_RELEASE_ASSETS_DIR.joinpath(*parts)
+    return candidates[-1]
 
 
 COVER_BASE_PATH = app_resource_path("cover_assets", "doll_cover_base.png")
@@ -231,6 +244,191 @@ def download_update_archive(work_dir: Path) -> Path:
                 raise ValueError("ไฟล์อัปเดตมีขนาดใหญ่เกินไป")
             archive.write(chunk)
     return archive_path
+
+
+def github_release_info(version: str | None = None) -> dict:
+    endpoint = f"{APP_RELEASES_API_URL}/tags/v{version}" if version else f"{APP_RELEASES_API_URL}/latest"
+    request_url = f"{endpoint}?_={int(datetime.now().timestamp() * 1_000_000)}"
+    request = urllib.request.Request(
+        request_url,
+        headers={"User-Agent": "Blythe-Eye-Maker", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    if not isinstance(release, dict) or not release.get("tag_name") or not isinstance(release.get("assets"), list):
+        raise ValueError("GitHub ไม่ได้ส่งข้อมูลรีลีสที่ถูกต้อง")
+    return release
+
+
+def download_release_asset(release: dict, asset_name: str, destination: Path) -> Path:
+    asset = next((item for item in release["assets"] if item.get("name") == asset_name), None)
+    if not asset:
+        raise ValueError(f"ไม่พบไฟล์ {asset_name} ใน GitHub Release")
+    expected_size = int(asset.get("size") or 0)
+    if expected_size > 500 * 1024 * 1024:
+        raise ValueError("ไฟล์จาก GitHub มีขนาดใหญ่เกินไป")
+    request = urllib.request.Request(
+        asset["browser_download_url"],
+        headers={"User-Agent": "Blythe-Eye-Maker", "Accept": "application/octet-stream"},
+    )
+    digest = hashlib.sha256()
+    total = 0
+    with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
+        while chunk := response.read(1024 * 1024):
+            total += len(chunk)
+            if total > 500 * 1024 * 1024:
+                raise ValueError("ไฟล์จาก GitHub มีขนาดใหญ่เกินไป")
+            digest.update(chunk)
+            output.write(chunk)
+    if expected_size and total != expected_size:
+        raise ValueError("ขนาดไฟล์ที่ดาวน์โหลดไม่ตรงกับ GitHub")
+    expected_digest = str(asset.get("digest") or "")
+    if expected_digest.startswith("sha256:") and digest.hexdigest() != expected_digest.removeprefix("sha256:"):
+        raise ValueError("ตรวจสอบความถูกต้องของไฟล์จาก GitHub ไม่ผ่าน")
+    return destination
+
+
+def extract_cover_asset_archive(archive_path: Path, destination: Path) -> None:
+    """Extract only the published cover-assets folder, rejecting unsafe ZIP paths."""
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            normalized = info.filename.replace("\\", "/")
+            parts = normalized.split("/")
+            if (
+                normalized.startswith("/")
+                or any(part in ("", ".", "..") for part in parts if part)
+                or not parts
+                or parts[0] != "cover_assets"
+            ):
+                raise ValueError("ไฟล์ข้อมูลมีเส้นทางที่ไม่ปลอดภัย")
+            target = destination.joinpath(*[part for part in parts if part])
+            if not target.resolve().is_relative_to(destination.resolve()):
+                raise ValueError("ไฟล์ข้อมูลอยู่นอกโฟลเดอร์โปรแกรม")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    required = (
+        destination / "cover_assets" / "doll_cover_base.png",
+        destination / "cover_assets" / "doll_cover_overlay.png",
+        destination / "cover_assets" / "templates_gpt_blank" / "manifest.json",
+    )
+    if not all(path.is_file() for path in required):
+        raise ValueError("แพ็กเกจข้อมูลหน้าปกไม่ครบ")
+
+
+def install_release_assets(archive_path: Path, version: str) -> None:
+    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    stage = SETTINGS_DIR / f".release_assets_stage_{os.getpid()}"
+    backup = SETTINGS_DIR / f".release_assets_backup_{os.getpid()}"
+    shutil.rmtree(stage, ignore_errors=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    try:
+        extract_cover_asset_archive(archive_path, stage)
+        (stage / "version.txt").write_text(version, encoding="utf-8")
+        if APP_RELEASE_ASSETS_DIR.exists():
+            APP_RELEASE_ASSETS_DIR.replace(backup)
+        stage.replace(APP_RELEASE_ASSETS_DIR)
+        shutil.rmtree(backup, ignore_errors=True)
+    except Exception:
+        if backup.exists() and not APP_RELEASE_ASSETS_DIR.exists():
+            backup.replace(APP_RELEASE_ASSETS_DIR)
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+def download_latest_release_exe(work_dir: Path) -> Path:
+    release = github_release_info()
+    return download_release_asset(release, APP_EXECUTABLE_NAME, work_dir / APP_EXECUTABLE_NAME)
+
+
+def ensure_release_assets() -> bool:
+    """Download the matching cover assets on first run of a standalone EXE."""
+    if not getattr(sys, "frozen", False):
+        return True
+    version_file = APP_RELEASE_ASSETS_DIR / "version.txt"
+    required = (COVER_BASE_PATH, COVER_OVERLAY_PATH, COVER_TEMPLATES_MANIFEST)
+    try:
+        if version_file.read_text(encoding="utf-8").strip() == f"v{APP_VERSION}" and all(
+            path.is_file() for path in required
+        ):
+            return True
+    except OSError:
+        pass
+
+    root = tk.Tk()
+    root.title("Blythe Eye Maker")
+    root.geometry("430x185")
+    root.resizable(False, False)
+    root.configure(bg=UI_BG)
+    icon_path = app_resource_path("branding", "BlytheEyeMaker.ico")
+    if icon_path.is_file():
+        try:
+            root.iconbitmap(str(icon_path))
+        except tk.TclError:
+            pass
+    ttk.Label(root, text="Blythe Eye Maker", font=("Segoe UI", 16, "bold")).pack(pady=(24, 8))
+    status = tk.StringVar(value="กำลังเตรียมไฟล์ประกอบจาก GitHub…")
+    ttk.Label(root, textvariable=status, style="Muted.TLabel").pack(pady=(0, 12))
+    progress = ttk.Progressbar(root, mode="indeterminate", length=350)
+    progress.pack(pady=(0, 14))
+    progress.start(12)
+    actions = ttk.Frame(root)
+    retry_button = ttk.Button(actions, text="ลองใหม่", command=lambda: start_download())
+    close_button = ttk.Button(actions, text="ปิด", command=root.destroy)
+    ready = {"ok": False, "busy": False}
+
+    def start_download() -> None:
+        if ready["busy"]:
+            return
+        ready["busy"] = True
+        status.set("กำลังดาวน์โหลดไฟล์หน้าปกและตรวจสอบข้อมูล…")
+        progress.start(12)
+        actions.pack_forget()
+
+        def worker() -> None:
+            temp_dir = Path(tempfile.mkdtemp(prefix="blythe_assets_"))
+            try:
+                release = github_release_info(APP_VERSION)
+                archive = download_release_asset(release, APP_ASSET_ARCHIVE_NAME, temp_dir / "assets.zip")
+                install_release_assets(archive, str(release["tag_name"]))
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                try:
+                    root.after(0, lambda: finish(None))
+                except tk.TclError:
+                    pass
+            except Exception as exc:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                try:
+                    root.after(0, lambda error=str(exc): finish(error))
+                except tk.TclError:
+                    pass
+
+        threading.Thread(target=worker, name="blythe-first-run-assets", daemon=True).start()
+
+    def finish(error: str | None) -> None:
+        ready["busy"] = False
+        progress.stop()
+        if error:
+            status.set("ดาวน์โหลดไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่")
+            actions.pack(pady=(4, 10))
+            retry_button.pack(side="left", padx=5)
+            close_button.pack(side="left", padx=5)
+            root.update_idletasks()
+            root.geometry(f"430x210+{root.winfo_screenwidth()//2-215}+{root.winfo_screenheight()//2-105}")
+            return
+        ready["ok"] = True
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    start_download()
+    root.update_idletasks()
+    root.geometry(f"430x185+{root.winfo_screenwidth()//2-215}+{root.winfo_screenheight()//2-92}")
+    root.mainloop()
+    return ready["ok"]
 
 
 def natural_number_key(value: str) -> tuple[int, ...]:
@@ -1265,6 +1463,12 @@ class BlytheA4App(TkinterDnD.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Blythe Eye Maker")
+        icon_path = app_resource_path("branding", "BlytheEyeMaker.ico")
+        if icon_path.is_file():
+            try:
+                self.iconbitmap(str(icon_path))
+            except tk.TclError:
+                pass
         self.geometry("760x560")
         self.minsize(680, 500)
         self.configure(bg=UI_BG)
@@ -2856,14 +3060,25 @@ class BlytheA4App(TkinterDnD.Tk):
         def download() -> None:
             work_dir = Path(tempfile.mkdtemp(prefix="blythe_update_"))
             try:
-                archive = download_update_archive(work_dir)
-                source_dir = extract_update_archive(archive, work_dir)
-                self.after(0, lambda: self._finish_program_update(dialog, status_var, button, work_dir, source_dir, None))
+                if getattr(sys, "frozen", False):
+                    update_file = download_latest_release_exe(work_dir)
+                    self.after(0, lambda: self._finish_program_update(
+                        dialog, status_var, button, work_dir, None, None, update_file
+                    ))
+                else:
+                    archive = download_update_archive(work_dir)
+                    source_dir = extract_update_archive(archive, work_dir)
+                    self.after(0, lambda: self._finish_program_update(
+                        dialog, status_var, button, work_dir, source_dir, None
+                    ))
             except Exception as exc:
                 shutil.rmtree(work_dir, ignore_errors=True)
-                self.after(0, lambda error=str(exc): self._finish_program_update(
-                    dialog, status_var, button, work_dir, None, error
-                ))
+                try:
+                    self.after(0, lambda error=str(exc): self._finish_program_update(
+                        dialog, status_var, button, work_dir, None, error
+                    ))
+                except tk.TclError:
+                    pass
 
         threading.Thread(target=download, name="blythe-program-update", daemon=True).start()
 
@@ -2875,9 +3090,10 @@ class BlytheA4App(TkinterDnD.Tk):
         work_dir: Path,
         source_dir: Path | None,
         error: str | None,
+        update_file: Path | None = None,
     ) -> None:
         self._program_update_running = False
-        if error or source_dir is None:
+        if error or (source_dir is None and update_file is None):
             status_var.set("ดาวน์โหลดอัปเดตไม่สำเร็จ")
             if dialog.winfo_exists():
                 button.configure(state="normal")
@@ -2896,30 +3112,50 @@ class BlytheA4App(TkinterDnD.Tk):
             button.configure(state="normal")
             return
 
-        app_root = Path(__file__).resolve().parents[1]
-        launcher = app_root / "เปิดโปรแกรม.bat"
-        updater = work_dir / "ติดตั้งอัปเดต.ps1"
-        updater.write_text(
-            "param([int]$ProcessId, [string]$StageRoot, [string]$InstallRoot, [string]$WorkDir, [string]$Launcher)\n"
-            "try {\n"
-            "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
-            "  Start-Sleep -Milliseconds 500\n"
-            "  Get-ChildItem -LiteralPath $StageRoot -Force | Copy-Item -Destination $InstallRoot -Recurse -Force\n"
-            "  Start-Process -FilePath $Launcher -WorkingDirectory $InstallRoot\n"
-            "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
-            "} catch {\n"
-            "  Add-Type -AssemblyName PresentationFramework\n"
-            "  [System.Windows.MessageBox]::Show(('ติดตั้งอัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
-            "}\n",
-            encoding="utf-8-sig",
-        )
+        frozen = getattr(sys, "frozen", False)
+        app_root = Path(sys.executable).resolve().parent if frozen else Path(__file__).resolve().parents[1]
+        launcher = Path(sys.executable).resolve() if frozen else app_root / "เปิดโปรแกรม.bat"
+        updater = Path(tempfile.gettempdir()) / f"blythe_apply_{os.getpid()}.ps1"
+        if frozen:
+            script = (
+                "param([int]$ProcessId, [string]$UpdatedExe, [string]$InstallExe, [string]$WorkDir)\n"
+                "try {\n"
+                "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
+                "  Start-Sleep -Milliseconds 500\n"
+                "  Move-Item -LiteralPath $UpdatedExe -Destination $InstallExe -Force\n"
+                "  Start-Process -FilePath $InstallExe -WorkingDirectory (Split-Path -Parent $InstallExe)\n"
+                "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+                "} catch {\n"
+                "  Add-Type -AssemblyName PresentationFramework\n"
+                "  [System.Windows.MessageBox]::Show(('อัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
+                "}\n"
+            )
+            args = [
+                "-ProcessId", str(os.getpid()), "-UpdatedExe", str(update_file),
+                "-InstallExe", str(launcher), "-WorkDir", str(work_dir),
+            ]
+        else:
+            script = (
+                "param([int]$ProcessId, [string]$StageRoot, [string]$InstallRoot, [string]$WorkDir, [string]$Launcher)\n"
+                "try {\n"
+                "  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue\n"
+                "  Start-Sleep -Milliseconds 500\n"
+                "  Get-ChildItem -LiteralPath $StageRoot -Force | Copy-Item -Destination $InstallRoot -Recurse -Force\n"
+                "  Start-Process -FilePath $Launcher -WorkingDirectory $InstallRoot\n"
+                "  Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+                "} catch {\n"
+                "  Add-Type -AssemblyName PresentationFramework\n"
+                "  [System.Windows.MessageBox]::Show(('ติดตั้งอัปเดตไม่สำเร็จ: ' + $_.Exception.Message), 'Blythe Eye Maker') | Out-Null\n"
+                "}\n"
+            )
+            args = [
+                "-ProcessId", str(os.getpid()), "-StageRoot", str(source_dir),
+                "-InstallRoot", str(app_root), "-WorkDir", str(work_dir), "-Launcher", str(launcher),
+            ]
+        updater.write_text(script, encoding="utf-8-sig")
         try:
             subprocess.Popen(
-                [
-                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater),
-                    "-ProcessId", str(os.getpid()), "-StageRoot", str(source_dir),
-                    "-InstallRoot", str(app_root), "-WorkDir", str(work_dir), "-Launcher", str(launcher),
-                ],
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(updater), *args],
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
                 close_fds=True,
             )
@@ -3875,5 +4111,6 @@ class BlytheA4App(TkinterDnD.Tk):
 
 
 if __name__ == "__main__":
-    app = BlytheA4App()
-    app.mainloop()
+    if ensure_release_assets():
+        app = BlytheA4App()
+        app.mainloop()
