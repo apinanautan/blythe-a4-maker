@@ -20,6 +20,14 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_ai_image_is_added_as_next_number(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            Image.new("RGB", (40, 20), "white").save(folder / "9.png")
+            self.assertEqual(_app.save_image_into_set(Image.new("RGBA", (40, 20), "red"), folder), "10")
+            self.assertTrue((folder / "10.png").is_file())
+            self.assertFalse(any(path.name.startswith(".") for path in folder.iterdir()))
+
     def test_saved_custom_pair_becomes_next_number_in_set_one(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

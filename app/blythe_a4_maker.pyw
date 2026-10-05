@@ -88,7 +88,7 @@ DATA_SYNC_STATE_FILE = SETTINGS_DIR / "data_sync_state.json"
 DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -551,6 +551,17 @@ def next_design_number(folder: Path) -> int:
     """The number after the highest whole-numbered design in a set folder."""
     numbers = [int(key.split(".")[0]) for key in discover_assets(folder)]
     return max(numbers, default=0) + 1
+
+
+def save_image_into_set(image: Image.Image, folder: Path) -> str:
+    """Save an eye image (a pair or a single eye) as the next number in a set folder."""
+    folder.mkdir(parents=True, exist_ok=True)
+    number = next_design_number(folder)
+    target = folder / f"{number}.png"
+    temporary = folder / f".{number}.tmp.png"
+    flatten_to_white(image.convert("RGBA")).save(temporary, format="PNG", dpi=(DPI, DPI))
+    temporary.replace(target)
+    return str(number)
 
 
 def save_pair_into_set(pair: tuple[Image.Image, Image.Image], folder: Path) -> str:
@@ -2197,6 +2208,14 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Label(form, textvariable=self.ai_single_status_var, style="Muted.TLabel").pack(
             anchor="w", pady=(8, 0)
         )
+        result_row = ttk.Frame(form)
+        result_row.pack(fill="x", pady=(6, 0))
+        ttk.Button(result_row, text="เพิ่มเข้า Data แบบที่หนึ่ง", command=self._ai_result_to_data).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(result_row, text="ส่งเข้ากล่องครอป A4", command=self._ai_result_to_crop).pack(
+            side="left", fill="x", expand=True, padx=(6, 0)
+        )
         self.ai_customer_link_button = tk.Button(
             form,
             text="OFF  ลิงก์ลูกค้า: ปิด",
@@ -3650,10 +3669,7 @@ class BlytheA4App(TkinterDnD.Tk):
                 command=lambda value=design_id: self.select_and_add(value),
             )
             button.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
-            if design_id.startswith(("custom:", "set1:")):
-                button.bind("<Button-3>", lambda event, value=design_id: self._show_custom_a4_menu(event, value))
-            else:
-                button.bind("<Button-3>", lambda _event, value=design_id: self.select_and_remove(value))
+            button.bind("<Button-3>", lambda event, value=design_id: self._show_custom_a4_menu(event, value))
             self.number_buttons[design_id] = button
 
         # The crop box sits on top so a long set 1 never pushes it out of view.
@@ -4394,14 +4410,77 @@ class BlytheA4App(TkinterDnD.Tk):
         menu = tk.Menu(self, tearoff=False)
         if self.selections.get(design_id):
             menu.add_command(label="เอาออกจากรายการ A4 1 คู่", command=lambda: self.select_and_remove(design_id))
+        menu.add_command(label="ส่งเข้ากล่องครอปด้านบน", command=lambda: self._send_design_to_crop(design_id))
+        menu.add_command(label="ส่งไปหน้า AI เป็นไฟล์แนบ", command=lambda: self._send_design_to_ai(design_id))
+        menu.add_separator()
         menu.add_command(
-            label=f"ลบรูป {display_design_id(design_id)} ทิ้ง",
+            label=f"ลบเฉพาะรูปนี้ ({display_design_id(design_id)})",
             command=lambda: self._delete_custom_a4(design_id),
         )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _design_source_png(self, design_id: str) -> tuple[Path, bool] | None:
+        """The design's source image as a file other pages can open (PSD becomes a temporary PNG)."""
+        path = self.assets.get(design_id)
+        if path is None or not path.is_file():
+            messagebox.showerror("ไม่พบไฟล์", f"ไม่พบไฟล์ของ {display_design_id(design_id)}", parent=self)
+            return None
+        if path.suffix.lower() != ".psd":
+            return path, False
+        try:
+            with Image.open(path) as opened:
+                image = opened.convert("RGBA")
+            handle, name = tempfile.mkstemp(prefix="blythe_design_", suffix=".png")
+            os.close(handle)
+            image.save(name, format="PNG")
+            return Path(name), True
+        except Exception as exc:
+            messagebox.showerror("เปิดไฟล์ไม่ได้", str(exc), parent=self)
+            return None
+
+    def _send_design_to_crop(self, design_id: str) -> None:
+        found = self._design_source_png(design_id)
+        if found is None:
+            return
+        self._show_page("a4")
+        self._open_custom_a4_path(found[0])
+        self.custom_a4_crop_status.set(f"{display_design_id(design_id)} • กด ครอป / จัดตำแหน่ง เพื่อปรับ")
+
+    def _send_design_to_ai(self, design_id: str) -> None:
+        found = self._design_source_png(design_id)
+        if found is None:
+            return
+        self._show_page("ai_single")
+        self._set_ai_reference_image(found[0], temporary=found[1])
+
+    def _ai_result_to_crop(self) -> None:
+        if self.ai_image_path is None or not self.ai_image_path.is_file():
+            messagebox.showinfo("ยังไม่มีรูป", "สร้างรูปในหน้า AI ก่อน", parent=self)
+            return
+        self._show_page("a4")
+        self._open_custom_a4_path(self.ai_image_path)
+
+    def _ai_result_to_data(self) -> None:
+        if self.ai_image_path is None or not self.ai_image_path.is_file():
+            messagebox.showinfo("ยังไม่มีรูป", "สร้างรูปในหน้า AI ก่อน", parent=self)
+            return
+        try:
+            with Image.open(self.ai_image_path) as opened:
+                number = save_image_into_set(opened, Path(self.source_var.get()))
+        except Exception as exc:
+            messagebox.showerror("เพิ่มเข้า Data ไม่ได้", str(exc), parent=self)
+            return
+        old_selections = self.selections.copy()
+        old_history = list(self.selection_history)
+        self.reload_assets()
+        self.selections = OrderedDict((key, count) for key, count in old_selections.items() if key in self.assets)
+        self.selection_history = [key for key in old_history if key in self.assets]
+        self.refresh_selection_status()
+        self.ai_single_status_var.set(f"เพิ่มเข้า Data แบบที่หนึ่ง เบอร์ {number} แล้ว")
+        self._start_data_sync()
 
     def _delete_custom_a4(self, design_id: str) -> None:
         if not design_id.startswith("custom:"):
@@ -4452,14 +4531,17 @@ class BlytheA4App(TkinterDnD.Tk):
             return
         if not messagebox.askyesno(
             "ลบลายตา",
-            f"ลบลายตาเบอร์ {display_design_id(design_id)} ทิ้งถาวร?\n\n"
+            f"ลบเฉพาะลายตาเบอร์ {display_design_id(design_id)} ทิ้งถาวร?\n\n"
             "เบอร์อื่นจะไม่เปลี่ยน (ลูกค้าที่จำเบอร์ไว้จะไม่สับสน) และไฟล์ใน GitHub จะถูกลบตามด้วย",
             icon="warning",
             parent=self,
         ):
             return
         try:
-            path.unlink(missing_ok=True)
+            # Only this number: the same design saved as .psd/.png/... but never other numbers.
+            for sibling in path.parent.iterdir():
+                if sibling.is_file() and sibling.stem == path.stem and sibling.suffix.lower() in VALID_EXTENSIONS:
+                    sibling.unlink()
         except OSError as exc:
             messagebox.showerror("ลบไม่ได้", str(exc), parent=self)
             return
