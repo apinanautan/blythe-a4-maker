@@ -79,7 +79,7 @@ DEFAULT_SOURCE_4X6 = DEFAULT_SOURCE.parent / "ไฟล์ตา"
 DEFAULT_OUTPUT_4X6 = DEFAULT_SOURCE.parent / "4x6_ลูกค้า"
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "BlytheA4Maker"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
-APP_UPDATE_URL = "https://github.com/apinanautan/blythe-a4-maker/archive/refs/heads/main.zip"
+APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
 
 COVER_CANVAS_SIZE = 1000
 COVER_EYE_SIZE = 195
@@ -207,8 +207,15 @@ def extract_update_archive(archive_path: Path, work_dir: Path) -> Path:
 
 def download_update_archive(work_dir: Path) -> Path:
     archive_path = work_dir / "latest.zip"
-    request = urllib.request.Request(APP_UPDATE_URL, headers={"User-Agent": "Blythe-Eye-Maker-Updater"})
-    with urllib.request.urlopen(request, timeout=60) as response, archive_path.open("wb") as archive:
+    headers = {"User-Agent": "Blythe-Eye-Maker-Updater", "Accept": "application/vnd.github+json"}
+    commit_request = urllib.request.Request(APP_UPDATE_API_URL, headers=headers)
+    with urllib.request.urlopen(commit_request, timeout=30) as response:
+        commit_sha = json.load(response).get("sha", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+        raise ValueError("GitHub ไม่ได้ส่งหมายเลขเวอร์ชันที่ถูกต้อง")
+    archive_url = f"https://github.com/apinanautan/blythe-a4-maker/archive/{commit_sha}.zip"
+    request = urllib.request.Request(archive_url, headers={"User-Agent": "Blythe-Eye-Maker-Updater"})
+    with urllib.request.urlopen(request, timeout=90) as response, archive_path.open("wb") as archive:
         length = int(response.headers.get("Content-Length", "0") or 0)
         if length > 250 * 1024 * 1024:
             raise ValueError("ไฟล์อัปเดตมีขนาดใหญ่เกินไป")
