@@ -1,4 +1,5 @@
 import importlib.machinery
+import json
 import importlib.util
 import sys
 import tempfile
@@ -20,6 +21,27 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_ai_cover_eyes_are_found_and_saved_in_the_name(self):
+        cover = Image.new("RGB", (1000, 1000), (240, 200, 190))
+        draw = ImageDraw.Draw(cover)
+        draw.ellipse((200, 410, 390, 600), fill="white")  # left blank eye, center (295, 505), 190 wide
+        draw.ellipse((650, 410, 840, 600), fill="white")
+        found = _app.detect_blank_eyes(cover, ((287, 502), (748, 503)))
+        self.assertIsNotNone(found)
+        (lx, ly), (rx, ry), size = found
+        self.assertLessEqual(abs(lx - 295), 2)
+        self.assertLessEqual(abs(rx - 745), 2)
+        self.assertLessEqual(abs(ly - 505), 2)
+        self.assertTrue(170 <= size <= 190)
+        self.assertIsNone(_app.detect_blank_eyes(Image.new("RGB", (1000, 1000), "white"), ((287, 502), (748, 503))))
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            _app.save_library_cover(cover, (lx, ly), (rx, ry), size, folder)
+            covers = _app.load_library_covers(folder)
+            self.assertEqual(list(covers), ["ai01"])
+            self.assertEqual(covers["ai01"]["left_center"], (lx, ly))
+            self.assertEqual(covers["ai01"]["eye_size"], size)
+
     def test_compact_numbers_keeps_order_and_pieces_together(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
@@ -45,7 +67,7 @@ class CustomA4Tests(unittest.TestCase):
             self.assertEqual((new / "1.png").read_text(), "one")
             self.assertTrue((old / "1.png").exists())
 
-    def test_turned_off_sets_are_hidden_and_set_three_is_not_synced(self):
+    def test_set_two_is_permanent_and_set_three_is_local_only(self):
         from types import SimpleNamespace
 
         source = Path("/data/ขายเเบบ1")
@@ -54,17 +76,71 @@ class CustomA4Tests(unittest.TestCase):
             source_4x6_var=SimpleNamespace(get=lambda: "/data/ไฟล์ตา"),
         )
         fake._extra_sets = lambda: _app.BlytheA4App._extra_sets(fake)
-        settings = {"set3_enabled": "1", "set3_folder": "/local/mine", "set3_name": "ของฉัน"}
+        settings = {"set2_enabled": "0", "set3_enabled": "1", "set3_folder": "/local/mine", "set3_name": "ของฉัน"}
         with unittest.mock.patch.object(_app, "load_user_settings", return_value=settings):
             self.assertEqual(
                 _app.BlytheA4App._extra_sets(fake),
                 [(2, "แบบที่สอง", source.parent / "ขายเเบบ2"), (3, "ของฉัน", Path("/local/mine"))],
             )
-            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "a4_set2", "sheets_4x6"})
-        settings = {"set2_enabled": "0", "set3_enabled": "0", "set3_folder": "/local/mine"}
-        with unittest.mock.patch.object(_app, "load_user_settings", return_value=settings):
-            self.assertEqual(_app.BlytheA4App._extra_sets(fake), [])
-            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "sheets_4x6"})
+            self.assertEqual(set(_app.BlytheA4App._data_sync_folders(fake)), {"a4_set1", "a4_set2", "sheets_4x6", "covers"})
+        with unittest.mock.patch.object(_app, "load_user_settings", return_value={"set3_folder": "/local/mine"}):
+            self.assertEqual([group for group, _title, _folder in _app.BlytheA4App._extra_sets(fake)], [2])
+
+    def test_trash_older_than_seven_days_is_removed(self):
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "set"
+            trash = Path(temp) / "trash"
+            folder.mkdir()
+            (folder / "1.png").write_text("old")
+            (folder / "2.png").write_text("new")
+            _app.move_design_to_trash(folder, "1", trash)
+            _app.move_design_to_trash(folder, "2", trash)
+            later = datetime.now() + timedelta(days=7, hours=1)
+            old_entry = next(item for item in _app.list_trash(trash) if item["stem"] == "1")
+            meta = trash / old_entry["id"] / "meta.json"
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            data["deleted_at"] = (datetime.now() - timedelta(days=8)).isoformat(timespec="seconds")
+            meta.write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(_app.purge_old_trash(trash_dir=trash), 1)
+            self.assertEqual([item["stem"] for item in _app.list_trash(trash)], ["2"])
+            self.assertEqual(_app.purge_old_trash(trash_dir=trash, now=later), 1)
+
+    def test_transparent_and_fake_transparent_backgrounds(self):
+        eye = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+        ImageDraw.Draw(eye).ellipse((50, 50, 149, 149), fill=(30, 120, 60, 255))
+        self.assertEqual(_app.background_kind(eye), "transparent")
+        left, _right = _app.make_custom_a4_pair_as_is(eye, 100)
+        # The eye is cut to its own edge, so it fills the whole size like other designs.
+        self.assertEqual(left.getpixel((50, 2))[3], 255)
+
+        checker = Image.new("RGB", (200, 200), "white")
+        draw = ImageDraw.Draw(checker)
+        for y in range(0, 200, 10):
+            for x in range(0, 200, 10):
+                if (x // 10 + y // 10) % 2:
+                    draw.rectangle((x, y, x + 9, y + 9), fill=(204, 204, 204))
+        draw.ellipse((50, 50, 149, 149), fill=(30, 120, 60))
+        self.assertEqual(_app.background_kind(checker), "checker")
+        cleaned = _app.remove_checker_background(checker)
+        self.assertEqual(cleaned.getpixel((5, 5))[3], 0)
+        self.assertEqual(cleaned.getpixel((100, 100))[3], 255)
+        self.assertEqual(_app.background_kind(Image.new("RGB", (100, 100), "white")), "solid")
+
+    def test_orders_are_folders_with_their_items(self):
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = _app.create_order("Nina", root, now=datetime(2026, 10, 5, 9, 0))
+            second = _app.create_order("Nina", root, now=datetime(2026, 10, 5, 10, 0))
+            self.assertEqual((first.name, second.name), ("2026-10-05_Nina", "2026-10-05_Nina_2"))
+            data = _app.load_order(second)
+            data["a4"] = ["set1:12", "set1:12"]
+            _app.save_order(second, data)
+            self.assertEqual(_app.list_orders(root), [second, first])
+            self.assertEqual(_app.load_order(second)["a4"], ["set1:12", "set1:12"])
 
     def test_trash_restore_and_renumber(self):
         with tempfile.TemporaryDirectory() as temp:

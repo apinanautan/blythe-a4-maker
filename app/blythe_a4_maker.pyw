@@ -24,6 +24,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from PIL import Image, ImageChops, ImageDraw, ImageGrab, ImageOps, ImageTk
 from blythe_ai import (
+    create_cover_template,
     BACKGROUND_PROMPTS,
     COLOR_PROMPTS,
     DESIGN_PROMPTS,
@@ -86,6 +87,7 @@ SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 DATA_SYNC_STATE_FILE = SETTINGS_DIR / "data_sync_state.json"
 TRASH_DIR = SETTINGS_DIR / "trash"
 UPDATE_LOG_FILE = SETTINGS_DIR / "update.log"
+TRASH_KEEP_DAYS = 7
 # Where a fresh install keeps the eye library downloaded from GitHub and the customer output.
 DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"  # customer output (visible)
 # The eye library lives inside the program (hidden) and syncs with GitHub.
@@ -93,10 +95,13 @@ LIBRARY_DIR = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") o
 LIBRARY_SET1 = LIBRARY_DIR / "ขายเเบบ1"
 LIBRARY_SET2 = LIBRARY_DIR / "ขายเเบบ2"
 LIBRARY_4X6 = LIBRARY_DIR / "ไฟล์ตา"
+ORDERS_DIR = DEFAULT_DATA_ROOT / "ออเดอร์"
+LIBRARY_COVERS = LIBRARY_DIR / "ปก"
+COVER_FILE_RE = re.compile(r"cover_(\d+)__L(\d+)x(\d+)_R(\d+)x(\d+)_S(\d+)")
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.4.0"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -147,6 +152,76 @@ def display_design_id(value: str) -> str:
     return value.split(":", 1)[1] if ":" in value else value
 
 
+def load_library_covers(folder: Path = LIBRARY_COVERS) -> OrderedDict[str, dict[str, object]]:
+    """AI covers saved in the library; eye positions are stored in the file name so the PNG alone syncs."""
+    covers: OrderedDict[str, dict[str, object]] = OrderedDict()
+    if not folder.is_dir():
+        return covers
+    found = []
+    for path in folder.glob("cover_*.png"):
+        match = COVER_FILE_RE.fullmatch(path.stem)
+        if match:
+            found.append((int(match.group(1)), path, match))
+    for number, path, match in sorted(found):
+        template_id = f"ai{number:02d}"
+        covers[template_id] = {
+            "id": template_id,
+            "title": "ปก AI",
+            "label": f"AI {number:02d} • ปกใหม่",
+            "path": path,
+            "sclera_blank": True,
+            "left_center": (int(match.group(2)), int(match.group(3))),
+            "right_center": (int(match.group(4)), int(match.group(5))),
+            "eye_size": int(match.group(6)),
+        }
+    return covers
+
+
+def detect_blank_eyes(
+    image: Image.Image,
+    hints: tuple[tuple[int, int], tuple[int, int]],
+) -> tuple[tuple[int, int], tuple[int, int], int] | None:
+    """Find the two blank white eyeballs near the reference cover's eye positions."""
+    rgb = image.convert("RGB").resize((COVER_CANVAS_SIZE, COVER_CANVAS_SIZE), Image.Resampling.LANCZOS)
+    low = rgb.convert("L").point(lambda value: 255 if value >= 228 else 0)
+    pale = rgb.convert("HSV").getchannel("S").point(lambda value: 255 if value <= 40 else 0)
+    mask = ImageChops.multiply(low, pale)
+    found = []
+    for hint_x, hint_y in hints:
+        seed = None
+        for radius in range(0, 60, 4):
+            for dx, dy in ((0, 0), (radius, 0), (-radius, 0), (0, radius), (0, -radius)):
+                x, y = hint_x + dx, hint_y + dy
+                if 0 <= x < COVER_CANVAS_SIZE and 0 <= y < COVER_CANVAS_SIZE and mask.getpixel((x, y)) == 255:
+                    seed = (x, y)
+                    break
+            if seed:
+                break
+        if seed is None:
+            return None
+        region = mask.copy()
+        ImageDraw.floodfill(region, seed, 128)
+        box = region.point(lambda value: 255 if value == 128 else 0).getbbox()
+        if box is None:
+            return None
+        width, height = box[2] - box[0], box[3] - box[1]
+        if not (120 <= width <= 300 and 100 <= height <= 300):
+            return None  # not an eye-sized blank area (e.g. a white background leaked in)
+        found.append(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2, min(width, height)))
+    (lx, ly, ls), (rx, ry, rs) = found
+    return (lx, ly), (rx, ry), max(150, min(230, round(min(ls, rs) * 0.95)))
+
+
+def save_library_cover(image: Image.Image, left: tuple[int, int], right: tuple[int, int], size: int,
+                       folder: Path = LIBRARY_COVERS) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    numbers = [int(match.group(1)) for path in folder.glob("cover_*.png") if (match := COVER_FILE_RE.fullmatch(path.stem))]
+    number = max(numbers, default=0) + 1
+    target = folder / f"cover_{number:03d}__L{left[0]}x{left[1]}_R{right[0]}x{right[1]}_S{size}.png"
+    image.convert("RGBA").resize((COVER_CANVAS_SIZE, COVER_CANVAS_SIZE), Image.Resampling.LANCZOS).save(target)
+    return target
+
+
 def load_cover_templates() -> OrderedDict[str, dict[str, object]]:
     templates: OrderedDict[str, dict[str, object]] = OrderedDict()
     try:
@@ -179,6 +254,7 @@ def load_cover_templates() -> OrderedDict[str, dict[str, object]]:
             "right_center": tuple(int(value) for value in right_center[:2]),
             "eye_size": int(item.get("eye_size") or COVER_EYE_SIZE),
         }
+    templates.update(load_library_covers())
     return templates
 
 
@@ -633,6 +709,43 @@ def next_design_number(folder: Path) -> int:
     return number
 
 
+def create_order(customer: str, root: Path = ORDERS_DIR, now: datetime | None = None) -> Path:
+    """Make a folder for one customer's order, e.g. 2026-10-05_Nina."""
+    now = now or datetime.now()
+    base = f"{now:%Y-%m-%d}_{sanitize_filename(customer) or 'ลูกค้า'}"
+    folder = root / base
+    number = 2
+    while folder.exists():
+        folder = root / f"{base}_{number}"
+        number += 1
+    folder.mkdir(parents=True)
+    save_order(folder, {"customer": customer.strip(), "created": now.isoformat(timespec="seconds"),
+                        "a4": [], "sheets_4x6": [], "note": ""})
+    return folder
+
+
+def load_order(folder: Path) -> dict:
+    try:
+        data = json.loads((folder / "order.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_order(folder: Path, data: dict) -> None:
+    temporary = folder / "order.json.tmp"
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(folder / "order.json")
+
+
+def list_orders(root: Path = ORDERS_DIR) -> list[Path]:
+    """Order folders, newest first."""
+    if not root.is_dir():
+        return []
+    return sorted((path for path in root.iterdir() if (path / "order.json").is_file()),
+                  key=lambda path: load_order(path).get("created", ""), reverse=True)
+
+
 def compact_design_numbers(folder: Path) -> dict[str, str]:
     """Renumber a set to 1..N without gaps, keeping order; 52.1/52.2 move together. Returns old->new stems."""
     stems = sorted({path.stem for path in folder.iterdir() if path.is_file() and path.suffix.lower() in VALID_EXTENSIONS and NUMBER_RE.fullmatch(path.stem)}, key=natural_number_key)
@@ -722,6 +835,21 @@ def restore_from_trash(entry_id: str, trash_dir: Path = TRASH_DIR) -> str:
             shutil.move(str(path), str(folder / f"{stem}{path.suffix}"))
     shutil.rmtree(entry, ignore_errors=True)
     return stem
+
+
+def purge_old_trash(days: int = TRASH_KEEP_DAYS, trash_dir: Path = TRASH_DIR, now: datetime | None = None) -> int:
+    """Delete trashed designs older than `days` for good. Returns how many were removed."""
+    now = now or datetime.now()
+    removed = 0
+    for item in list_trash(trash_dir):
+        try:
+            deleted_at = datetime.fromisoformat(item.get("deleted_at", ""))
+        except ValueError:
+            continue
+        if (now - deleted_at).days >= days:
+            purge_trash(item["id"], trash_dir)
+            removed += 1
+    return removed
 
 
 def purge_trash(entry_id: str | None = None, trash_dir: Path = TRASH_DIR) -> None:
@@ -1166,6 +1294,45 @@ def _has_uniform_edge_background(image: Image.Image) -> bool:
     return spread <= 32 and center_difference >= 30
 
 
+def background_kind(image: Image.Image) -> str:
+    """'transparent' (real alpha), 'checker' (a fake transparency pattern baked into the pixels) or 'solid'."""
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    edge = max(4, min(width, height) // 12)
+    corners = [rgba.crop(box) for box in (
+        (0, 0, edge, edge), (width - edge, 0, width, edge),
+        (0, height - edge, edge, height), (width - edge, height - edge, width, height),
+    )]
+    if all(corner.getchannel("A").getextrema()[1] < 128 for corner in corners):
+        return "transparent"
+    checker_corners = 0
+    for corner in corners:
+        gray = corner.convert("L")
+        low, high = gray.getextrema()
+        saturation = corner.convert("HSV").getchannel("S").getextrema()[1]
+        if high >= 230 and 150 <= low <= 225 and high - low >= 12 and saturation <= 30:
+            checker_corners += 1
+    return "checker" if checker_corners >= 3 else "solid"
+
+
+def remove_checker_background(image: Image.Image) -> Image.Image:
+    """Make a baked-in light grey/white checkerboard around the eye truly transparent."""
+    rgba = image.convert("RGBA")
+    hsv = rgba.convert("HSV")
+    light = rgba.convert("L").point(lambda value: 255 if value >= 150 else 0)
+    pale = hsv.getchannel("S").point(lambda value: 255 if value <= 30 else 0)
+    mask = ImageChops.multiply(light, pale)
+    width, height = mask.size
+    # Only checker pixels connected to the border are background; pale pixels inside the eye stay.
+    for x, y in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+        if mask.getpixel((x, y)) == 255:
+            ImageDraw.floodfill(mask, (x, y), 128)
+    background = mask.point(lambda value: 255 if value == 128 else 0)
+    alpha = ImageChops.subtract(rgba.getchannel("A"), background)
+    rgba.putalpha(alpha)
+    return rgba
+
+
 def trim_custom_a4_transparent_margin(image: Image.Image, threshold: int = 12) -> Image.Image:
     """Center crop artwork by its visible pixels instead of uneven empty file margins."""
     rgba = image.convert("RGBA")
@@ -1299,6 +1466,9 @@ def make_custom_a4_pair_as_is(image: Image.Image, size_px: int) -> tuple[Image.I
 
     result: list[Image.Image] = []
     for piece in pieces:
+        if piece.getchannel("A").getextrema()[0] < 250:
+            # Real transparency: select the eye itself (like Photoshop's object select) so it fills the size.
+            piece = trim_custom_a4_transparent_margin(piece)
         fitted = ImageOps.contain(piece, (size_px, size_px), Image.Resampling.LANCZOS)
         corners = [piece.getpixel(point) for point in ((0, 0), (piece.width - 1, 0), (0, piece.height - 1), (piece.width - 1, piece.height - 1))]
         background = (255, 255, 255, 255) if all(pixel[3] == 255 for pixel in corners) else (0, 0, 0, 0)
@@ -1897,7 +2067,6 @@ class BlytheA4App(TkinterDnD.Tk):
         self.thumbnails: dict[str, ImageTk.PhotoImage] = {}
         self.preview_photo: ImageTk.PhotoImage | None = None
         self.cover_selected_id: str | None = None
-        self.cover_number_buttons: dict[str, tk.Button] = {}
         self.cover_preview_photo: ImageTk.PhotoImage | None = None
         self.cover_templates = load_cover_templates()
         self.cover_random_label = "★ สุ่มปก"
@@ -1968,11 +2137,24 @@ class BlytheA4App(TkinterDnD.Tk):
             if not getattr(self, "_data_sync_finished_once", False) and time.time() - started < 150:
                 self.after(1000, self._ci_screenshot_tick, folder, started, 0)
                 return
+            self._show_page("a4")
             self.after(1500, self._ci_screenshot_tick, folder, started, 1)
         elif stage == 1:
-            grab(self, "main.png")
+            grab(self, "a4.png")
+            self._show_page("crop")
+            self.after(1500, self._ci_screenshot_tick, folder, started, 2)
+        elif stage == 2:
+            grab(self, "crop.png")
+            self._show_page("orders")
+            self.after(1500, self._ci_screenshot_tick, folder, started, 3)
+        elif stage == 3:
+            grab(self, "orders.png")
+            self._show_page("cover")
+            self.after(1500, self._ci_screenshot_tick, folder, started, 5)
+        elif stage == 5:
+            grab(self, "cover.png")
             self.open_settings()
-            self.after(2500, self._ci_screenshot_tick, folder, started, 2)
+            self.after(2500, self._ci_screenshot_tick, folder, started, 4)
         else:
             dialogs = [child for child in self.winfo_children() if isinstance(child, tk.Toplevel)]
             if dialogs:
@@ -2051,86 +2233,254 @@ class BlytheA4App(TkinterDnD.Tk):
 
         nav = tk.Frame(outer, bg=UI_BG)
         nav.pack(fill="x", pady=(7, 6))
-        self.a4_nav_button = tk.Button(
-            nav,
-            text="A4",
-            command=lambda: self._show_page("a4"),
-            relief="flat",
-            bd=0,
-            padx=18,
-            pady=6,
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            highlightthickness=0,
-        )
-        self.a4_nav_button.pack(side="left")
-        self.six_nav_button = tk.Button(
-            nav,
-            text="4×6 นิ้ว",
-            command=lambda: self._show_page("4x6"),
-            relief="flat",
-            bd=0,
-            padx=18,
-            pady=6,
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            highlightthickness=0,
-        )
-        self.six_nav_button.pack(side="left", padx=(4, 0))
-        self.ai_single_nav_button = tk.Button(
-            nav,
-            text="AI 1 คู่",
-            command=lambda: self._show_page("ai_single"),
-            relief="flat",
-            bd=0,
-            padx=14,
-            pady=6,
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            highlightthickness=0,
-        )
-        self.ai_single_nav_button.pack(side="left", padx=(4, 0))
-        self.ai_collection_nav_button = tk.Button(
-            nav,
-            text="AI 16 คู่",
-            command=lambda: self._show_page("ai_collection"),
-            relief="flat",
-            bd=0,
-            padx=14,
-            pady=6,
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            highlightthickness=0,
-        )
-        self.ai_collection_nav_button.pack(side="left", padx=(4, 0))
-        self.cover_nav_button = tk.Button(
-            nav,
-            text="รูปปก",
-            command=lambda: self._show_page("cover"),
-            relief="flat",
-            bd=0,
-            padx=14,
-            pady=6,
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            highlightthickness=0,
-        )
-        self.cover_nav_button.pack(side="left", padx=(4, 0))
-
         self.page_host = ttk.Frame(outer)
         self.page_host.pack(fill="both", expand=True)
-        self.a4_page = ttk.Frame(self.page_host)
-        self.six_page = ttk.Frame(self.page_host)
-        self.ai_single_page = ttk.Frame(self.page_host)
-        self.ai_collection_page = ttk.Frame(self.page_host)
-        self.cover_page = ttk.Frame(self.page_host)
-        self._build_a4_page(self.a4_page)
-        self._build_4x6_page(self.six_page)
-        self._build_ai_single_page(self.ai_single_page)
-        self._build_ai_collection_page(self.ai_collection_page)
-        self._build_cover_page(self.cover_page)
+        page_specs = (
+            ("crop", "✂ ขอบลูกตา", self._build_crop_page),
+            ("a4", "A4", self._build_a4_page),
+            ("4x6", "4×6 นิ้ว", self._build_4x6_page),
+            ("ai_single", "AI 1 คู่", self._build_ai_single_page),
+            ("ai_collection", "AI 16 คู่", self._build_ai_collection_page),
+            ("cover", "รูปปก", self._build_cover_page),
+            ("orders", "ลูกค้า", self._build_orders_page),
+        )
+        self.pages: dict[str, ttk.Frame] = {}
+        self.nav_buttons: dict[str, tk.Button] = {}
+        for index, (name, label, _builder) in enumerate(page_specs):
+            button = tk.Button(
+                nav,
+                text=label,
+                command=lambda value=name: self._show_page(value),
+                relief="flat",
+                bd=0,
+                padx=14,
+                pady=6,
+                font=("Segoe UI", 9, "bold"),
+                cursor="hand2",
+                highlightthickness=0,
+            )
+            button.pack(side="left", padx=(0 if index == 0 else 4, 0))
+            self.nav_buttons[name] = button
+            self.pages[name] = ttk.Frame(self.page_host)
+        self.a4_page = self.pages["a4"]
+        self.six_page = self.pages["4x6"]
+        self.ai_single_page = self.pages["ai_single"]
+        self.ai_collection_page = self.pages["ai_collection"]
+        self.cover_page = self.pages["cover"]
+        for name, _label, builder in page_specs:
+            builder(self.pages[name])
         self.bind_all("<MouseWheel>", self._on_mousewheel)
         self._show_page("a4")
+
+    def _build_orders_page(self, parent: ttk.Frame) -> None:
+        self.current_order: Path | None = None
+        body = ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y")
+        tk.Button(
+            left,
+            text="＋ ออเดอร์ใหม่",
+            command=self._new_order,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            pady=6,
+            cursor="hand2",
+        ).pack(fill="x")
+        self.orders_list = tk.Listbox(left, width=30, height=24, activestyle="none", exportselection=False)
+        self.orders_list.pack(fill="y", expand=True, pady=(6, 0))
+        self.orders_list.bind("<<ListboxSelect>>", lambda _event: self._select_order())
+        self._order_folders: list[Path] = []
+
+        right = tk.Frame(body, bg=UI_SURFACE, highlightthickness=1, highlightbackground=UI_BORDER, padx=14, pady=12)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        self.order_title_var = tk.StringVar(value="เลือกออเดอร์ทางซ้าย หรือกด ออเดอร์ใหม่")
+        tk.Label(right, textvariable=self.order_title_var, font=("Segoe UI", 12, "bold"), fg=UI_ACCENT_DARK,
+                 bg=UI_SURFACE).pack(anchor="w")
+        self.order_detail_var = tk.StringVar(value="")
+        tk.Label(right, textvariable=self.order_detail_var, font=("Segoe UI", 9), fg=UI_TEXT, bg=UI_SURFACE,
+                 justify="left", wraplength=420).pack(anchor="w", pady=(6, 10))
+
+        def step(title: str) -> tk.Frame:
+            box = tk.Frame(right, bg=UI_SURFACE)
+            box.pack(fill="x", pady=(4, 8))
+            tk.Label(box, text=title, font=("Segoe UI", 9, "bold"), fg=UI_TEXT, bg=UI_SURFACE).pack(anchor="w", pady=(0, 4))
+            return box
+
+        pick = step("① เลือกลายในหน้า A4 / 4×6 แล้วกด")
+        ttk.Button(pick, text="ใส่รายการที่เลือกอยู่ลงออเดอร์นี้", command=self._save_selection_to_order).pack(fill="x")
+        ttk.Button(pick, text="โหลดรายการของออเดอร์นี้กลับไปแก้", command=self._load_order_selection).pack(fill="x", pady=(6, 0))
+        make = step("② ทำไฟล์พร้อมพิมพ์")
+        tk.Button(
+            make,
+            text="ทำไฟล์พร้อมพิมพ์ลงโฟลเดอร์ออเดอร์",
+            command=self._print_order,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            pady=6,
+            cursor="hand2",
+        ).pack(fill="x")
+        other = tk.Frame(right, bg=UI_SURFACE)
+        other.pack(fill="x", pady=(8, 0))
+        ttk.Button(other, text="เปิดโฟลเดอร์", command=self._open_order_folder).pack(side="left", fill="x", expand=True)
+        ttk.Button(other, text="ลบออเดอร์", command=self._delete_order).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+    def _refresh_orders(self, select: Path | None = None) -> None:
+        self._order_folders = list_orders()
+        self.orders_list.delete(0, "end")
+        for folder in self._order_folders:
+            data = load_order(folder)
+            count = len(data.get("a4", [])) + len(data.get("sheets_4x6", []))
+            self.orders_list.insert("end", f"{data.get('created', '')[:10]}  {data.get('customer', folder.name)}  ({count} คู่)")
+        target = select or self.current_order
+        if target in self._order_folders:
+            index = self._order_folders.index(target)
+            self.orders_list.selection_clear(0, "end")
+            self.orders_list.selection_set(index)
+            self.orders_list.see(index)
+        self._show_order(target if target in self._order_folders else None)
+
+    def _select_order(self) -> None:
+        picked = self.orders_list.curselection()
+        if picked:
+            self._show_order(self._order_folders[picked[0]])
+
+    def _show_order(self, folder: Path | None) -> None:
+        self.current_order = folder
+        if folder is None:
+            self.order_title_var.set("เลือกออเดอร์ทางซ้าย หรือกด ออเดอร์ใหม่")
+            self.order_detail_var.set(f"ออเดอร์เก็บที่ {ORDERS_DIR}")
+            return
+        data = load_order(folder)
+        self.customer_var.set(data.get("customer", ""))
+        self.order_title_var.set(f"{data.get('customer', '')} • {data.get('created', '')[:16].replace('T', ' ')}")
+        a4_counts: OrderedDict[str, int] = OrderedDict()
+        for key in data.get("a4", []):
+            a4_counts[key] = a4_counts.get(key, 0) + 1
+        a4_text = ", ".join(
+            f"{display_design_id(key)}×{count}" if count > 1 else display_design_id(key) for key, count in a4_counts.items()
+        ) or "-"
+        six_text = f"{len(data.get('sheets_4x6', []))} คู่" if data.get("sheets_4x6") else "-"
+        files = sorted(path.name for path in folder.iterdir() if path.suffix.lower() == ".png")
+        self.order_detail_var.set(
+            f"A4: {a4_text}\n4×6: {six_text}\n\nไฟล์พร้อมพิมพ์: " + (", ".join(files) if files else "ยังไม่ได้ทำ")
+        )
+
+    def _new_order(self) -> None:
+        name = simpledialog.askstring("ออเดอร์ใหม่", "ชื่อลูกค้า", initialvalue=self.customer_var.get(), parent=self)
+        if not name or not name.strip():
+            return
+        try:
+            folder = create_order(name)
+        except OSError as exc:
+            messagebox.showerror("สร้างออเดอร์ไม่ได้", str(exc), parent=self)
+            return
+        self._refresh_orders(select=folder)
+
+    def _require_order(self) -> Path | None:
+        if self.current_order is None or not self.current_order.is_dir():
+            messagebox.showinfo("ยังไม่ได้เลือกออเดอร์", "เลือกออเดอร์ทางซ้าย หรือกด ออเดอร์ใหม่ ก่อน", parent=self)
+            return None
+        return self.current_order
+
+    def _save_selection_to_order(self) -> None:
+        folder = self._require_order()
+        if folder is None:
+            return
+        sheets = [key for key in self.six_selection_history if not key.startswith("data::")]
+        skipped = len(self.six_selection_history) - len(sheets)
+        if not self.selection_history and not sheets:
+            messagebox.showinfo("ยังไม่ได้เลือก", "เลือกลายในหน้า A4 หรือ 4×6 ก่อน", parent=self)
+            return
+        data = load_order(folder)
+        data["a4"] = [key for key in self.selection_history if not key.startswith("custom:")]
+        data["sheets_4x6"] = sheets
+        save_order(folder, data)
+        self._refresh_orders(select=folder)
+        if skipped or any(key.startswith("custom:") for key in self.selection_history):
+            messagebox.showinfo(
+                "บันทึกแล้ว",
+                "รูปชั่วคราว (ครอป/AI ที่ยังไม่ได้บันทึกเข้าแบบที่หนึ่ง) เก็บในออเดอร์ไม่ได้\n"
+                "กด บันทึกเข้าแบบที่หนึ่ง ก่อน แล้วค่อยใส่ลงออเดอร์",
+                parent=self,
+            )
+
+    def _load_order_selection(self) -> None:
+        folder = self._require_order()
+        if folder is None:
+            return
+        data = load_order(folder)
+        self.selections.clear()
+        self.selection_history = [key for key in data.get("a4", []) if key in self.assets]
+        for key in self.selection_history:
+            self.selections[key] = self.selections.get(key, 0) + 1
+        self.six_selections.clear()
+        self.six_selection_history = [key for key in data.get("sheets_4x6", []) if key in self.six_pair_refs]
+        for key in self.six_selection_history:
+            self.six_selections[key] = self.six_selections.get(key, 0) + 1
+        self.refresh_selection_status()
+        self.refresh_4x6_selection_status()
+        missing = len(data.get("a4", [])) - len(self.selection_history) + len(data.get("sheets_4x6", [])) - len(self.six_selection_history)
+        self._show_page("a4")
+        if missing:
+            messagebox.showinfo("บางลายหายไป", f"มี {missing} คู่ที่ไม่พบแล้ว (อาจถูกลบหรือเปลี่ยนเบอร์)", parent=self)
+
+    def _print_order(self) -> None:
+        folder = self._require_order()
+        if folder is None:
+            return
+        data = load_order(folder)
+        a4_keys = [key for key in data.get("a4", []) if key in self.assets]
+        six_keys = [key for key in data.get("sheets_4x6", []) if key in self.six_pair_refs]
+        if not a4_keys and not six_keys:
+            messagebox.showinfo("ออเดอร์ว่าง", "ใส่รายการลงออเดอร์ก่อน", parent=self)
+            return
+        outputs: list[Path] = []
+        try:
+            if a4_keys:
+                counts: OrderedDict[str, int] = OrderedDict()
+                for key in a4_keys:
+                    counts[key] = counts.get(key, 0) + 1
+                outputs += build_a4_pages(
+                    self.assets, counts, folder, customer_name=data.get("customer", ""),
+                    diameter_mm=DEFAULT_DIAMETER_MM, prepared_assets=self.prepared_assets,
+                )
+            if six_keys:
+                outputs += build_4x6_pages(self.six_pair_refs, six_keys, folder, customer_name=data.get("customer", ""))
+        except Exception as exc:
+            messagebox.showerror("ทำไฟล์ไม่สำเร็จ", str(exc), parent=self)
+            return
+        self._show_order(folder)
+        messagebox.showinfo("ทำไฟล์แล้ว", f"ได้ {len(outputs)} ไฟล์ในโฟลเดอร์ออเดอร์", parent=self)
+
+    def _open_order_folder(self) -> None:
+        folder = self._require_order()
+        if folder is not None:
+            subprocess.Popen(["explorer", str(folder)])
+
+    def _delete_order(self) -> None:
+        folder = self._require_order()
+        if folder is None:
+            return
+        if messagebox.askyesno("ลบออเดอร์", f"ลบออเดอร์ {folder.name} และไฟล์ในโฟลเดอร์นี้?", icon="warning", parent=self):
+            shutil.rmtree(folder, ignore_errors=True)
+            self.current_order = None
+            self._refresh_orders()
+
+    def _build_crop_page(self, parent: ttk.Frame) -> None:
+        holder = ttk.Frame(parent)
+        holder.pack(fill="x", anchor="n")
+        self._build_custom_a4_crop_panel(holder)
 
     def _build_a4_page(self, parent: ttk.Frame) -> None:
         body = ttk.Frame(parent)
@@ -2278,17 +2628,36 @@ class BlytheA4App(TkinterDnD.Tk):
         self.cover_template_combo.bind("<<ComboboxSelected>>", self._on_cover_template_changed)
         ttk.Button(chooser, text="สุ่มปก", command=self.randomize_cover_template).pack(side="left")
 
-        self.cover_number_canvas = tk.Canvas(number_box, highlightthickness=0, bg=UI_BG)
-        scrollbar = ttk.Scrollbar(number_box, orient="vertical", command=self.cover_number_canvas.yview)
-        self.cover_number_canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        self.cover_number_canvas.pack(side="left", fill="both", expand=True)
-        self.cover_number_grid = ttk.Frame(self.cover_number_canvas)
-        self.cover_number_window = self.cover_number_canvas.create_window(
-            (0, 0), window=self.cover_number_grid, anchor="nw"
+        info = tk.Frame(number_box, bg=UI_SURFACE, highlightthickness=1, highlightbackground=UI_BORDER, padx=14, pady=12)
+        info.pack(fill="x")
+        self.cover_eye_var = tk.StringVar(value="ยังไม่ได้เลือกลายตา")
+        tk.Label(info, textvariable=self.cover_eye_var, font=("Segoe UI", 11, "bold"), fg=UI_ACCENT_DARK,
+                 bg=UI_SURFACE).pack(anchor="w")
+        tk.Label(
+            info,
+            text="เลือกลายตา: คลิกขวาที่ลายในหน้า A4 → ส่งไปหน้าปก",
+            font=("Segoe UI", 9),
+            fg=UI_MUTED,
+            bg=UI_SURFACE,
+        ).pack(anchor="w", pady=(2, 10))
+        self.cover_ai_button = tk.Button(
+            info,
+            text="✨ เจนปกใหม่ด้วย AI",
+            command=self.generate_ai_cover,
+            bg=UI_ACCENT,
+            fg="white",
+            activebackground=UI_ACCENT_DARK,
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            pady=6,
+            cursor="hand2",
         )
-        self.cover_number_grid.bind("<Configure>", self._update_cover_scrollregion)
-        self.cover_number_canvas.bind("<Configure>", self._resize_cover_number_grid)
+        self.cover_ai_button.pack(fill="x")
+        self.cover_ai_status_var = tk.StringVar(value="ได้ปกแบบใหม่ ไม่ซ้ำของเดิม • เซฟขึ้น GitHub ให้อัตโนมัติ")
+        tk.Label(info, textvariable=self.cover_ai_status_var, font=("Segoe UI", 9), fg=UI_MUTED, bg=UI_SURFACE,
+                 wraplength=380, justify="left").pack(anchor="w", pady=(6, 0))
 
         preview = ttk.Frame(body, padding=(8, 0, 0, 0))
         preview.pack(side="right", fill="y")
@@ -3221,58 +3590,25 @@ class BlytheA4App(TkinterDnD.Tk):
         self._set_ai_busy(False)
 
     def _show_page(self, page: str) -> None:
+        page = page if page in self.pages else "a4"
         self.current_page = page
-        self.a4_page.pack_forget()
-        self.six_page.pack_forget()
-        self.ai_single_page.pack_forget()
-        self.ai_collection_page.pack_forget()
-        self.cover_page.pack_forget()
-        active_bg = UI_ACCENT
-        inactive_bg = UI_SURFACE
-        if page == "ai_single":
-            self.ai_single_page.pack(fill="both", expand=True)
-            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_single_nav_button.configure(bg=active_bg, fg="white")
-            self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-        elif page == "ai_collection":
-            self.ai_collection_page.pack(fill="both", expand=True)
-            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_collection_nav_button.configure(bg=active_bg, fg="white")
-            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-        elif page == "cover":
-            self.cover_page.pack(fill="both", expand=True)
-            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.cover_nav_button.configure(bg=active_bg, fg="white")
-            self.show_cover_preview()
-        elif page == "4x6":
-            self.six_page.pack(fill="both", expand=True)
-            self.a4_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.six_nav_button.configure(bg=active_bg, fg="white")
-            self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.show_4x6_preview()
-        else:
-            self.a4_page.pack(fill="both", expand=True)
-            self.a4_nav_button.configure(bg=active_bg, fg="white")
-            self.six_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_single_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.ai_collection_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
-            self.cover_nav_button.configure(bg=inactive_bg, fg=UI_TEXT)
+        for name, frame in self.pages.items():
+            frame.pack_forget()
+            active = name == page
+            self.nav_buttons[name].configure(bg=UI_ACCENT if active else UI_SURFACE, fg="white" if active else UI_TEXT)
+        self.pages[page].pack(fill="both", expand=True)
+        if page == "a4":
             self.show_preview()
+        elif page == "4x6":
+            self.show_4x6_preview()
+        elif page == "cover":
+            self.show_cover_preview()
+        elif page == "orders":
+            self._refresh_orders()
 
     def _on_mousewheel(self, event) -> None:
         if self.current_page == "4x6":
             canvas = self.six_number_canvas
-        elif self.current_page == "cover":
-            canvas = self.cover_number_canvas
         elif self.current_page == "a4":
             canvas = self.number_canvas
         else:
@@ -3284,12 +3620,6 @@ class BlytheA4App(TkinterDnD.Tk):
 
     def _resize_number_grid(self, event) -> None:
         self.number_canvas.itemconfigure(self.number_window, width=event.width)
-
-    def _update_cover_scrollregion(self, _event=None) -> None:
-        self.cover_number_canvas.configure(scrollregion=self.cover_number_canvas.bbox("all"))
-
-    def _resize_cover_number_grid(self, event) -> None:
-        self.cover_number_canvas.itemconfigure(self.cover_number_window, width=event.width)
 
     def _update_4x6_scrollregion(self, _event=None) -> None:
         self.six_number_canvas.configure(scrollregion=self.six_number_canvas.bbox("all"))
@@ -3319,8 +3649,7 @@ class BlytheA4App(TkinterDnD.Tk):
         settings = load_user_settings()
         source = Path(self.source_var.get())
         sets = []
-        if settings.get("set2_enabled", "1") == "1":
-            sets.append((2, "แบบที่สอง", second_source_folder(source)))
+        sets.append((2, "แบบที่สอง", second_source_folder(source)))  # always on: designs for sale
         set3_folder = settings.get("set3_folder", "").strip()
         if settings.get("set3_enabled", "0") == "1" and set3_folder:
             sets.append((3, settings.get("set3_name", "").strip() or "แบบเพิ่มเติม", Path(set3_folder)))
@@ -3333,6 +3662,7 @@ class BlytheA4App(TkinterDnD.Tk):
             if group == 2:
                 folders["a4_set2"] = folder
         folders["sheets_4x6"] = Path(self.source_4x6_var.get())
+        folders["covers"] = LIBRARY_COVERS
         return folders
 
     def _compare_data_sync(self, status_var: tk.StringVar) -> None:
@@ -3340,7 +3670,7 @@ class BlytheA4App(TkinterDnD.Tk):
         status_var.set("กำลังนับรูปในเครื่องกับบน GitHub…")
         folders = self._data_sync_folders()
         token = load_user_settings().get("github_token", "")
-        names = {"a4_set1": "แบบที่หนึ่ง", "a4_set2": "แบบที่สอง", "sheets_4x6": "ไฟล์ตา 4×6"}
+        names = {"a4_set1": "แบบที่หนึ่ง", "a4_set2": "แบบที่สอง", "sheets_4x6": "ไฟล์ตา 4×6", "covers": "ปก AI"}
 
         def worker() -> None:
             try:
@@ -3485,7 +3815,6 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(library_row, text="เปิดโฟลเดอร์", command=lambda: open_folder(LIBRARY_DIR)).pack(side="right")
 
         saved = load_user_settings()
-        set2_on = tk.BooleanVar(value=saved.get("set2_enabled", "1") == "1")
         set3_var = tk.StringVar(value=saved.get("set3_folder", ""))
         set3_name_var = tk.StringVar(value=saved.get("set3_name", "") or "แบบเพิ่มเติม")
         set3_on = tk.BooleanVar(value=saved.get("set3_enabled", "0") == "1")
@@ -3513,9 +3842,9 @@ class BlytheA4App(TkinterDnD.Tk):
             refresh()
 
         ttk.Label(sets_frame, text="แบบที่สอง", width=14).grid(row=0, column=0, sticky="w")
-        set2_hint = ttk.Label(sets_frame, style="Muted.TLabel")
-        set2_hint.grid(row=0, column=1, columnspan=2, sticky="w")
-        toggle_button(0, set2_on, set2_hint, "เปิดอยู่ • ซิงค์กับ GitHub", [])
+        ttk.Label(sets_frame, text="มีถาวร • ซิงค์กับ GitHub", style="Muted.TLabel").grid(
+            row=0, column=1, columnspan=3, sticky="w"
+        )
 
         set3_name = ttk.Entry(sets_frame, textvariable=set3_name_var, width=14)
         set3_name.grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -3603,7 +3932,7 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Label(trash_row, text="ถังขยะ", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(
             trash_row,
-            text=f"รูปที่ลบไป {len(list_trash())} รูป • กู้คืนหรือลบถาวรได้",
+            text=f"รูปที่ลบไป {len(list_trash())} รูป • เก็บ {TRASH_KEEP_DAYS} วันแล้วลบเอง",
             style="Muted.TLabel",
         ).pack(side="left", padx=8)
         ttk.Button(trash_row, text="เปิดถังขยะ", command=lambda: self._open_trash(dialog)).pack(side="right")
@@ -3630,7 +3959,6 @@ class BlytheA4App(TkinterDnD.Tk):
             settings = load_user_settings()
             settings.update(
                 {
-                    "set2_enabled": "1" if set2_on.get() else "0",
                     "set3_folder": str(Path(set3_value).expanduser().resolve()) if set3_value else "",
                     "set3_name": set3_name_var.get().strip(),
                     "set3_enabled": "1" if set3_on.get() else "0",
@@ -3983,9 +4311,7 @@ class BlytheA4App(TkinterDnD.Tk):
             button.bind("<Button-3>", lambda event, value=design_id: self._show_custom_a4_menu(event, value))
             self.number_buttons[design_id] = button
 
-        # The crop box sits on top so a long set 1 never pushes it out of view.
-        self._build_custom_a4_crop_panel(0)
-        row_cursor = 1
+        row_cursor = 0
         # Unsaved crops (session only) follow set 1 instead of having their own section.
         set_one = group_ids[1] + group_ids[0]
         for index, design_id in enumerate(set_one):
@@ -4040,72 +4366,7 @@ class BlytheA4App(TkinterDnD.Tk):
 
         self.reload_4x6_assets()
 
-    def _reload_cover_buttons(self, group_ids: dict[int, list[str]]) -> None:
-        for child in self.cover_number_grid.winfo_children():
-            child.destroy()
-        self.cover_number_buttons.clear()
-
-        columns = 5
-
-        def add_button(design_id: str, row: int, col: int) -> None:
-            photo = self.thumbnails.get(design_id)
-            button = tk.Button(
-                self.cover_number_grid,
-                text=display_design_id(design_id),
-                image=photo,
-                compound="top",
-                width=72,
-                height=70,
-                padx=1,
-                pady=1,
-                font=("Segoe UI", 8, "bold"),
-                relief="flat",
-                bd=0,
-                bg=UI_SURFACE,
-                fg=UI_TEXT,
-                activebackground=UI_ACCENT_SOFT,
-                activeforeground=UI_ACCENT_DARK,
-                highlightthickness=1,
-                highlightbackground=UI_BORDER,
-                highlightcolor=UI_ACCENT,
-                cursor="hand2",
-                command=lambda value=design_id: self.select_cover_eye(value),
-            )
-            button.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
-            self.cover_number_buttons[design_id] = button
-
-        row_cursor = 0
-        for index, design_id in enumerate(group_ids[1]):
-            row_offset, col = divmod(index, columns)
-            add_button(design_id, row_cursor + row_offset, col)
-        if group_ids[1]:
-            row_cursor += (len(group_ids[1]) + columns - 1) // columns
-
-        for group in (group for group in group_ids if group > 1):
-            if not group_ids[group]:
-                continue
-            ttk.Label(
-                self.cover_number_grid,
-                text=self.set_titles[group],
-                font=("Segoe UI", 11, "bold"),
-                foreground=UI_ACCENT_DARK,
-            ).grid(
-                row=row_cursor,
-                column=0,
-                columnspan=columns,
-                sticky="w",
-                padx=4,
-                pady=(12, 6),
-            )
-            row_cursor += 1
-            for index, design_id in enumerate(group_ids[group]):
-                row_offset, col = divmod(index, columns)
-                add_button(design_id, row_cursor + row_offset, col)
-            row_cursor += (len(group_ids[group]) + columns - 1) // columns
-
-        for col in range(columns):
-            self.cover_number_grid.columnconfigure(col, weight=1)
-
+    def _reload_cover_buttons(self, _group_ids: dict[int, list[str]]) -> None:
         if self.cover_selected_id not in self.prepared_assets:
             self.cover_selected_id = self.design_ids[0] if self.design_ids else None
         self.refresh_cover_selection()
@@ -4119,13 +4380,70 @@ class BlytheA4App(TkinterDnD.Tk):
         self.show_cover_preview()
 
     def refresh_cover_selection(self) -> None:
-        for design_id, button in self.cover_number_buttons.items():
-            selected = design_id == self.cover_selected_id
-            button.configure(
-                bg=UI_ACCENT_SOFT if selected else UI_SURFACE,
-                fg=UI_ACCENT_DARK if selected else UI_TEXT,
-                highlightbackground=UI_ACCENT if selected else UI_BORDER,
+        if hasattr(self, "cover_eye_var"):
+            self.cover_eye_var.set(
+                f"ลายตาที่ใช้: {display_design_id(self.cover_selected_id)}" if self.cover_selected_id else "ยังไม่ได้เลือกลายตา"
             )
+
+    def _send_design_to_cover(self, design_id: str) -> None:
+        self.select_cover_eye(design_id)
+        self._show_page("cover")
+
+    def _reload_cover_templates(self, select_id: str | None = None) -> None:
+        self.cover_templates = load_cover_templates()
+        self.cover_template_labels = OrderedDict(
+            [(self.cover_random_label, "__random__")]
+            + [(str(item["label"]), template_id) for template_id, item in self.cover_templates.items()]
+        )
+        self.cover_template_combo.configure(values=list(self.cover_template_labels))
+        if select_id in self.cover_templates:
+            self.cover_template_var.set(str(self.cover_templates[select_id]["label"]))
+        self.show_cover_preview()
+
+    def generate_ai_cover(self) -> None:
+        references = [item for key, item in self.cover_templates.items() if not key.startswith("ai")]
+        references = references or list(self.cover_templates.values())
+        if not references:
+            messagebox.showerror("เจนปกไม่ได้", "ไม่พบปกต้นแบบ", parent=self)
+            return
+        reference = random.choice(references)
+        self.cover_ai_button.configure(state="disabled")
+        self.cover_ai_status_var.set("กำลังให้ AI วาดปกใหม่… (ประมาณ 1–2 นาที)")
+
+        def worker() -> None:
+            work = Path(tempfile.mkdtemp(prefix="blythe_cover_"))
+            try:
+                path = create_cover_template(Path(reference["path"]), work)
+                with Image.open(path) as opened:
+                    image = opened.convert("RGBA")
+                found = detect_blank_eyes(image, (reference["left_center"], reference["right_center"]))
+                if found is None:
+                    # The eyes were not left blank enough to measure: reuse the reference layout.
+                    found = (reference["left_center"], reference["right_center"], int(reference["eye_size"]))
+                saved = save_library_cover(image, *found)
+                result, error = saved, None
+            except Exception as exc:
+                result, error = None, str(exc)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+            try:
+                self.after(0, self._finish_ai_cover, result, error)
+            except (RuntimeError, tk.TclError):
+                pass
+
+        threading.Thread(target=worker, name="blythe-ai-cover", daemon=True).start()
+
+    def _finish_ai_cover(self, saved: Path | None, error: str | None) -> None:
+        self.cover_ai_button.configure(state="normal")
+        if error or saved is None:
+            self.cover_ai_status_var.set("เจนปกไม่สำเร็จ")
+            messagebox.showerror("เจนปกไม่สำเร็จ", error or "ไม่ทราบสาเหตุ", parent=self)
+            return
+        match = COVER_FILE_RE.fullmatch(saved.stem)
+        new_id = f"ai{int(match.group(1)):02d}" if match else None
+        self._reload_cover_templates(new_id)
+        self.cover_ai_status_var.set("ได้ปกใหม่แล้ว ✓ • กำลังเซฟขึ้น GitHub")
+        self._start_data_sync()
 
     def current_cover_template(self) -> dict[str, object] | None:
         template_id = self.cover_template_labels.get(self.cover_template_var.get())
@@ -4173,7 +4491,7 @@ class BlytheA4App(TkinterDnD.Tk):
             pass
 
     def cover_output_dir(self) -> Path:
-        return Path(self.source_var.get()).parent / "รูปปกลูกค้า"
+        return DEFAULT_DATA_ROOT / "รูปปกลูกค้า"
 
     def open_cover_output_folder(self) -> None:
         folder = self.cover_output_dir()
@@ -4512,6 +4830,9 @@ class BlytheA4App(TkinterDnD.Tk):
         except Exception as exc:
             messagebox.showerror("เปิดรูปคัสตอมไม่ได้", str(exc), parent=self)
             return
+        kind = background_kind(source)
+        if kind == "checker":
+            source = remove_checker_background(source)
         self.custom_a4_image = source
         preview_source = source.copy()
         preview_source.thumbnail((512, 512), Image.Resampling.BILINEAR)
@@ -4523,20 +4844,24 @@ class BlytheA4App(TkinterDnD.Tk):
         self.custom_a4_zoom.set(100)
         self.custom_a4_pan_x = 0.0
         self.custom_a4_pan_y = 0.0
-        self.custom_a4_crop_status.set(path.name)
+        notes = {
+            "transparent": "พื้นหลังโปร่งใสจริง ✓ ตัดตามขอบลูกตาให้อัตโนมัติ",
+            "checker": "พื้นหลังเป็นลายตารางปลอม (ไม่ใช่โปร่งใสจริง) • ลบลายตารางให้แล้ว",
+        }
+        self.custom_a4_crop_status.set(f"{path.name}\n{notes[kind]}" if kind in notes else path.name)
         self._update_custom_a4_crop_actions()
         self._render_custom_a4_crop()
 
-    def _build_custom_a4_crop_panel(self, row: int) -> None:
+    def _build_custom_a4_crop_panel(self, parent: tk.Misc) -> None:
         panel = tk.Frame(
-            self.number_grid,
+            parent,
             bg=UI_SURFACE,
             highlightthickness=1,
             highlightbackground=UI_BORDER,
             padx=14,
             pady=12,
         )
-        panel.grid(row=row, column=0, columnspan=6, sticky="ew", padx=3, pady=(4, 12))
+        panel.pack(fill="x", padx=3, pady=(4, 12))
         panel.columnconfigure(1, weight=1)
 
         crop = tk.Canvas(
@@ -4765,6 +5090,8 @@ class BlytheA4App(TkinterDnD.Tk):
             menu.add_command(label="เอาออกจากรายการ A4 1 คู่", command=lambda: self.select_and_remove(design_id))
         menu.add_command(label="ส่งเข้ากล่องครอปด้านบน", command=lambda: self._send_design_to_crop(design_id))
         menu.add_command(label="ส่งไปหน้า 4×6", command=lambda: self._send_design_to_4x6(design_id))
+        if not design_id.startswith("custom:"):
+            menu.add_command(label="ส่งไปหน้าปก", command=lambda: self._send_design_to_cover(design_id))
         menu.add_command(label="ส่งไปหน้า AI เป็นไฟล์แนบ", command=lambda: self._send_design_to_ai(design_id))
         menu.add_separator()
         if not design_id.startswith("custom:"):
@@ -4802,7 +5129,7 @@ class BlytheA4App(TkinterDnD.Tk):
         found = self._design_source_png(design_id)
         if found is None:
             return
-        self._show_page("a4")
+        self._show_page("crop")
         self._open_custom_a4_path(found[0])
         self.custom_a4_crop_status.set(f"{display_design_id(design_id)} • กด ครอป / จัดตำแหน่ง เพื่อปรับ")
 
@@ -4817,7 +5144,7 @@ class BlytheA4App(TkinterDnD.Tk):
         if self.ai_image_path is None or not self.ai_image_path.is_file():
             messagebox.showinfo("ยังไม่มีรูป", "สร้างรูปในหน้า AI ก่อน", parent=self)
             return
-        self._show_page("a4")
+        self._show_page("crop")
         self._open_custom_a4_path(self.ai_image_path)
 
     def _ai_result_to_data(self) -> None:
@@ -5018,7 +5345,7 @@ class BlytheA4App(TkinterDnD.Tk):
         if not messagebox.askyesno(
             "ลบลายตา",
             f"ลบเฉพาะลายตาเบอร์ {display_design_id(design_id)}?\n\n"
-            "รูปจะไปอยู่ในถังขยะ กู้คืนได้ที่ ตั้งค่า → ถังขยะ\n"
+            f"รูปจะไปอยู่ในถังขยะ {TRASH_KEEP_DAYS} วัน กู้คืนได้ที่ ตั้งค่า → ถังขยะ\n"
             "เบอร์อื่นไม่เปลี่ยน และรูปจะหายจาก GitHub ด้วย จนกว่าจะกู้คืน",
             icon="warning",
             parent=self,
@@ -5212,6 +5539,10 @@ if __name__ == "__main__":
             pass
     if _run_update_self_test():
         sys.exit(0)
+    try:
+        purge_old_trash()  # the trash keeps deleted designs for 7 days
+    except OSError:
+        pass
     if ensure_release_assets():
         app = BlytheA4App()
         app.mainloop()
