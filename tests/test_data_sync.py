@@ -89,6 +89,19 @@ class DataSyncTests(unittest.TestCase):
         self.assertTrue(result.upload_needs_token)
         self.assertNotIn("a4_set1/5.png", github.files)
 
+    def test_compare_counts_both_sides(self):
+        github = FakeGitHub({"a4_set1/1.png": b"one", "a4_set1/2.png": b"two", "a4_set1/3.png": b"old"})
+        folders = self.folders("pc")
+        folders["a4_set1"].mkdir(parents=True)
+        (folders["a4_set1"] / "1.png").write_bytes(b"one")
+        (folders["a4_set1"] / "3.png").write_bytes(b"new")
+        (folders["a4_set1"] / "4.png").write_bytes(b"four")
+        status = data_sync.compare(folders, self.state, client=github)["a4_set1"]
+        self.assertEqual((status.local, status.remote), (3, 3))
+        self.assertEqual((status.only_local, status.only_remote, status.different), (1, 1, 1))
+        self.assertFalse(status.in_sync)
+        self.assertTrue(data_sync.compare(folders, self.state, client=github)["a4_set2"].in_sync)
+
 
 if __name__ == "__main__":
     unittest.main()

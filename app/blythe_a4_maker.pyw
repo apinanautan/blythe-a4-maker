@@ -89,7 +89,7 @@ DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -3091,6 +3091,42 @@ class BlytheA4App(TkinterDnD.Tk):
             "sheets_4x6": Path(self.source_4x6_var.get()),
         }
 
+    def _compare_data_sync(self, status_var: tk.StringVar) -> None:
+        """Show how many images this computer and GitHub each have, and whether they match."""
+        status_var.set("กำลังนับรูปในเครื่องกับบน GitHub…")
+        folders = self._data_sync_folders()
+        token = load_user_settings().get("github_token", "")
+        names = {"a4_set1": "แบบที่หนึ่ง", "a4_set2": "แบบที่สอง", "sheets_4x6": "ไฟล์ตา 4×6"}
+
+        def worker() -> None:
+            try:
+                report = data_sync.compare(folders, DATA_SYNC_STATE_FILE, token)
+            except Exception as exc:
+                text = f"ตรวจไม่ได้: {exc}"
+            else:
+                lines = []
+                for prefix, status in report.items():
+                    line = f"{names.get(prefix, prefix)}:  ในเครื่อง {status.local}  •  GitHub {status.remote}  •  "
+                    if status.in_sync:
+                        line += "ตรงกัน ✓"
+                    else:
+                        parts = []
+                        if status.only_local:
+                            parts.append(f"มีแค่ในเครื่อง {status.only_local}")
+                        if status.only_remote:
+                            parts.append(f"มีแค่บน GitHub {status.only_remote}")
+                        if status.different:
+                            parts.append(f"ไฟล์ไม่เหมือนกัน {status.different}")
+                        line += "ไม่ตรง ✗ (" + ", ".join(parts) + ") กด ซิงค์ตอนนี้"
+                    lines.append(line)
+                text = "\n".join(lines)
+            try:
+                self.after(0, lambda: status_var.set(text))
+            except (RuntimeError, tk.TclError):
+                pass
+
+        threading.Thread(target=worker, name="blythe-data-compare", daemon=True).start()
+
     def _start_data_sync(self) -> None:
         """Sync the eye library with GitHub in the background."""
         if self._data_sync_running:
@@ -3270,14 +3306,23 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(sync_row, text="ดูรูปบน GitHub", command=lambda: webbrowser.open(GITHUB_DATA_URL)).pack(
             side="right", padx=(0, 6)
         )
+        compare_var = tk.StringVar(value="กำลังนับรูปในเครื่องกับบน GitHub…")
+        compare_row = ttk.Frame(frame)
+        compare_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Label(compare_row, textvariable=compare_var, style="Muted.TLabel", justify="left").pack(side="left")
+        ttk.Button(compare_row, text="ตรวจอีกครั้ง", command=lambda: self._compare_data_sync(compare_var)).pack(
+            side="right", anchor="n"
+        )
+        self._compare_data_sync(compare_var)
+
         token_row = ttk.Frame(frame)
-        token_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        token_row.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Label(token_row, text="GitHub token (ใช้ตอนอัปรูปขึ้น)", style="Muted.TLabel").pack(side="left")
         ttk.Entry(token_row, textvariable=token_var, width=30, show="•").pack(side="left", padx=6)
         ttk.Button(token_row, text="วิธีสร้าง token", command=lambda: self._show_token_help(dialog)).pack(side="right")
 
         uninstall_row = ttk.Frame(frame)
-        uninstall_row.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        uninstall_row.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Label(uninstall_row, text="ถอนการติดตั้ง", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(
             uninstall_row,
@@ -3287,7 +3332,7 @@ class BlytheA4App(TkinterDnD.Tk):
         ttk.Button(uninstall_row, text="ถอนการติดตั้ง", command=lambda: self._uninstall_program(dialog)).pack(side="right")
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=11, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        buttons.grid(row=12, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="left", padx=(0, 6))
 
         def save_and_close() -> None:
