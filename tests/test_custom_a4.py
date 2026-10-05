@@ -20,6 +20,20 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_design_file_can_be_placed_on_4x6_page(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pair = Path(temp) / "64.png"
+            sheet = Image.new("RGB", (400, 200), "white")
+            ImageDraw.Draw(sheet).ellipse((0, 0, 199, 199), fill="red")
+            ImageDraw.Draw(sheet).ellipse((200, 0, 399, 199), fill="blue")
+            sheet.save(pair)
+            page = _app.render_4x6_page({"data::64::1": (pair, 0)}, ["data::64::1"])
+            self.assertEqual(page.size, (_app.SIX_BY_FOUR_WIDTH, _app.SIX_BY_FOUR_HEIGHT))
+            first = (_app.SIX_BY_FOUR_SOURCE_X_CENTERS[0], _app.SIX_BY_FOUR_SOURCE_Y_CENTERS[0])
+            second = (_app.SIX_BY_FOUR_SOURCE_X_CENTERS[1], _app.SIX_BY_FOUR_SOURCE_Y_CENTERS[0])
+            self.assertEqual(page.getpixel(first), (255, 0, 0))
+            self.assertEqual(page.getpixel(second), (0, 0, 255))
+
     def test_ai_image_is_added_as_next_number(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

@@ -89,7 +89,7 @@ DEFAULT_DATA_ROOT = Path.home() / "Documents" / "Blythe Eye Maker"
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -1506,7 +1506,11 @@ def prepare_4x6_layout(
         if ref is None:
             raise ValueError(f"ไม่พบคู่ตา {pair_key}")
         path, pair_index = ref
-        left, right = extract_4x6_pair(path, pair_index, size_px)
+        if pair_index == 0:
+            # A design from Data, a crop or the AI page rather than a pair on a 4x6 sheet.
+            left, right = (make_chip(piece, size_px) for piece in split_or_duplicate_pair(path))
+        else:
+            left, right = extract_4x6_pair(path, pair_index, size_px)
         slots.extend((left, right))
 
     return slots, size_px, SIX_BY_FOUR_COLUMNS * SIX_BY_FOUR_ROWS
@@ -1709,6 +1713,7 @@ class BlytheA4App(TkinterDnD.Tk):
         self.cover_template_var = tk.StringVar(value=self.cover_random_label)
         self.six_sheets: OrderedDict[str, Path] = OrderedDict()
         self.six_pair_refs: OrderedDict[str, tuple[Path, int]] = OrderedDict()
+        self.six_extra_refs: OrderedDict[str, tuple[Path, int]] = OrderedDict()
         self.six_selections: OrderedDict[str, int] = OrderedDict()
         self.six_selection_history: list[str] = []
         self.six_number_buttons: dict[str, tk.Button] = {}
@@ -2215,6 +2220,9 @@ class BlytheA4App(TkinterDnD.Tk):
             side="left", fill="x", expand=True
         )
         ttk.Button(result_row, text="ส่งเข้ากล่องครอป A4", command=self._ai_result_to_crop).pack(
+            side="left", fill="x", expand=True, padx=(6, 0)
+        )
+        ttk.Button(result_row, text="เพิ่มลงหน้า 4×6", command=self._ai_result_to_4x6).pack(
             side="left", fill="x", expand=True, padx=(6, 0)
         )
         self.ai_customer_link_button = tk.Button(
@@ -3905,6 +3913,7 @@ class BlytheA4App(TkinterDnD.Tk):
         for sheet_name, path in self.six_sheets.items():
             for pair_index in range(1, 17):
                 self.six_pair_refs[four_pair_key(sheet_name, pair_index)] = (path, pair_index)
+        self.six_pair_refs.update(self.six_extra_refs)
 
         self.six_selections.clear()
         self.six_selection_history.clear()
@@ -4299,7 +4308,16 @@ class BlytheA4App(TkinterDnD.Tk):
             state=("normal" if self.custom_a4_image else "disabled"),
         )
         save_button.pack(side="left", padx=3)
-        self.custom_a4_crop_buttons = [direct_button, crop_toggle_button, crop_button, save_button]
+        more_actions = ttk.Frame(panel)
+        more_actions.pack(pady=(4, 0))
+        six_button = ttk.Button(
+            more_actions,
+            text="เพิ่มลงหน้า 4×6",
+            command=self._custom_a4_to_4x6,
+            state=("normal" if self.custom_a4_image else "disabled"),
+        )
+        six_button.pack(side="left", padx=3)
+        self.custom_a4_crop_buttons = [direct_button, crop_toggle_button, crop_button, save_button, six_button]
         self._update_custom_a4_crop_actions()
         if self.custom_a4_image is not None:
             self._render_custom_a4_crop()
@@ -4416,6 +4434,7 @@ class BlytheA4App(TkinterDnD.Tk):
         if self.selections.get(design_id):
             menu.add_command(label="เอาออกจากรายการ A4 1 คู่", command=lambda: self.select_and_remove(design_id))
         menu.add_command(label="ส่งเข้ากล่องครอปด้านบน", command=lambda: self._send_design_to_crop(design_id))
+        menu.add_command(label="ส่งไปหน้า 4×6", command=lambda: self._send_design_to_4x6(design_id))
         menu.add_command(label="ส่งไปหน้า AI เป็นไฟล์แนบ", command=lambda: self._send_design_to_ai(design_id))
         menu.add_separator()
         menu.add_command(
@@ -4558,24 +4577,80 @@ class BlytheA4App(TkinterDnD.Tk):
         self.refresh_selection_status()
         self._start_data_sync()
 
+    def _custom_a4_pair(self, use_crop: bool) -> tuple[Image.Image, Image.Image]:
+        if use_crop:
+            return make_custom_a4_pair(
+                self.custom_a4_crop_source or self.custom_a4_image,
+                diameter_to_pixels(DEFAULT_DIAMETER_MM),
+                zoom=self.custom_a4_zoom.get() / 100,
+                pan_x=self.custom_a4_pan_x,
+                pan_y=self.custom_a4_pan_y,
+            )
+        return make_custom_a4_pair_as_is(self.custom_a4_image, diameter_to_pixels(DEFAULT_DIAMETER_MM))
+
+    def _write_temp_pair(self, pair: tuple[Image.Image, Image.Image]) -> Path:
+        """Save a pair side by side in the session temp folder (the two-up layout set files use)."""
+        left, right = (flatten_to_white(eye) for eye in pair)
+        sheet = Image.new("RGB", (left.width + right.width, max(left.height, right.height)), "white")
+        sheet.paste(left, (0, 0))
+        sheet.paste(right, (left.width, 0))
+        handle, name = tempfile.mkstemp(prefix="pair_", suffix=".png", dir=self.custom_a4_temp.name)
+        os.close(handle)
+        sheet.save(name, format="PNG", dpi=(DPI, DPI))
+        return Path(name)
+
+    def _add_to_4x6(self, path: Path, label: str) -> None:
+        """Queue a design file (two-up or single eye) on the 4x6 page."""
+        key = f"data::{label}::{len(self.six_extra_refs) + 1}"
+        self.six_extra_refs[key] = (path, 0)
+        self.six_pair_refs[key] = (path, 0)
+        self.select_4x6_and_add(key)
+
+    def _custom_a4_to_4x6(self) -> None:
+        if self.custom_a4_image is None:
+            return
+        try:
+            path = self._write_temp_pair(self._custom_a4_pair(self.custom_a4_crop_mode))
+        except Exception as exc:
+            messagebox.showerror("ส่งไปหน้า 4×6 ไม่ได้", str(exc), parent=self)
+            return
+        self._add_to_4x6(path, "ครอป")
+        self.custom_a4_crop_status.set(f"เพิ่มลงหน้า 4×6 แล้ว • ตอนนี้ {self.six_status_var.get()}")
+
+    def _send_design_to_4x6(self, design_id: str) -> None:
+        try:
+            if design_id.startswith("custom:"):
+                chips = self.prepared_assets[design_id]
+                with Image.open(chips[0]) as left, Image.open(chips[-1]) as right:
+                    path = self._write_temp_pair((left.convert("RGBA"), right.convert("RGBA")))
+            else:
+                path = self.assets[design_id]
+                if path.suffix.lower() == ".psd":
+                    with Image.open(path) as opened:
+                        image = opened.convert("RGBA")
+                    handle, name = tempfile.mkstemp(prefix="design_", suffix=".png", dir=self.custom_a4_temp.name)
+                    os.close(handle)
+                    image.save(name, format="PNG")
+                    path = Path(name)
+        except Exception as exc:
+            messagebox.showerror("ส่งไปหน้า 4×6 ไม่ได้", str(exc), parent=self)
+            return
+        self._add_to_4x6(path, display_design_id(design_id))
+        self.cache_var.set(f"ส่ง {display_design_id(design_id)} ไปหน้า 4×6 แล้ว • ตอนนี้ {self.six_status_var.get()}")
+
+    def _ai_result_to_4x6(self) -> None:
+        if self.ai_image_path is None or not self.ai_image_path.is_file():
+            messagebox.showinfo("ยังไม่มีรูป", "สร้างรูปในหน้า AI ก่อน", parent=self)
+            return
+        self._add_to_4x6(self.ai_image_path, "AI")
+        self.ai_single_status_var.set(f"เพิ่มลงหน้า 4×6 แล้ว • ตอนนี้ {self.six_status_var.get()}")
+
     def _apply_custom_a4_crop(self, persist: bool, crop: bool | None = None) -> None:
         if self.custom_a4_image is None or self.custom_a4_source_path is None:
             return
         try:
             use_crop = self.custom_a4_crop_mode if crop is None else crop
-            if use_crop:
-                pair = make_custom_a4_pair(
-                    self.custom_a4_crop_source or self.custom_a4_image,
-                    diameter_to_pixels(DEFAULT_DIAMETER_MM),
-                    zoom=self.custom_a4_zoom.get() / 100,
-                    pan_x=self.custom_a4_pan_x,
-                    pan_y=self.custom_a4_pan_y,
-                )
-            else:
-                pair = make_custom_a4_pair_as_is(
-                    self.custom_a4_image,
-                    diameter_to_pixels(DEFAULT_DIAMETER_MM),
-                )
+            pair = self._custom_a4_pair(use_crop)
             if persist:
                 number = save_pair_into_set(pair, Path(self.source_var.get()))
                 custom_id = design_key(1, number)
