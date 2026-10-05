@@ -414,6 +414,11 @@ try {
 """
 
 
+# PowerShell started with DETACHED_PROCESS exits at once without running its script
+# (verified on Windows in CI); CREATE_NO_WINDOW keeps it hidden and working.
+POWERSHELL_HELPER_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def launch_exe_updater(process_id: int, update_file: Path, install_exe: Path, work_dir: Path) -> None:
     """Start the PowerShell helper that swaps in the new EXE after this process exits and reopens it."""
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -430,7 +435,7 @@ def launch_exe_updater(process_id: int, update_file: Path, install_exe: Path, wo
             stdin=subprocess.DEVNULL,
             stdout=console,
             stderr=subprocess.STDOUT,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            creationflags=POWERSHELL_HELPER_FLAGS,
             close_fds=True,
             env=relaunch_environment(),
         )
@@ -3607,7 +3612,7 @@ class BlytheA4App(TkinterDnD.Tk):
                     "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(uninstaller),
                     "-ProcessId", str(os.getpid()), "-ListFile", str(target_list),
                 ],
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                creationflags=POWERSHELL_HELPER_FLAGS,
                 close_fds=True,
                 env=relaunch_environment(),
                 cwd=tempfile.gettempdir(),
@@ -3751,7 +3756,7 @@ class BlytheA4App(TkinterDnD.Tk):
                 "-ProcessId", str(os.getpid()), "-StageRoot", str(source_dir),
                 "-InstallRoot", str(app_root), "-WorkDir", str(work_dir), "-Launcher", str(launcher),
             ],
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            creationflags=POWERSHELL_HELPER_FLAGS,
             close_fds=True,
             env=relaunch_environment(),
         )
