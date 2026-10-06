@@ -1,0 +1,39 @@
+name: BlytheEyeMaker
+options:
+  bundleIdPrefix: com.apinan
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  BlytheEyeMaker:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: web
+        type: folder
+        buildPhase: resources
+      - path: Assets.xcassets
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Blythe Eye
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad:
+          [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSPhotoLibraryUsageDescription: เลือกรูปตาเพื่อทำ Eye chip
+        NSPhotoLibraryAddUsageDescription: บันทึกไฟล์ A4 / 4x6 / รูปปก ลงรูปภาพ
+        NSCameraUsageDescription: ถ่ายรูปตาเพื่อทำ Eye chip
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.apinan.blytheeyemaker
+        MARKETING_VERSION: ${MARKETING_VERSION}
+        CURRENT_PROJECT_VERSION: ${BUILD_NUMBER}
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""

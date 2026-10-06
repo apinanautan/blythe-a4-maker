@@ -216,6 +216,11 @@ class GitHubData:
             self._request("PATCH", f"{API}/git/refs/heads/{BRANCH}", {"sha": new_commit["sha"]})
         else:
             self._request("POST", f"{API}/git/refs", {"ref": f"refs/heads/{BRANCH}", "sha": new_commit["sha"]})
+        try:
+            # Ask GitHub to rebuild the iPhone library now (it also rebuilds hourly).
+            self._request("POST", f"{API}/dispatches", {"event_type": "library-updated"})
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
         return new_commit["sha"]
 
 

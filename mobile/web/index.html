@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#2BA66A">
+<title>Blythe Eye Maker</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <input id="customer" placeholder="ชื่อลูกค้า" autocomplete="off">
+  <span id="status" class="muted">กำลังโหลดลายตา…</span>
+</header>
+
+<main>
+  <section id="page-a4" class="page active">
+    <div id="a4-sets"></div>
+  </section>
+
+  <section id="page-six" class="page">
+    <label class="row">ไฟล์ 4×6 <select id="six-sheet"></select></label>
+    <div id="six-pairs" class="pairs"></div>
+  </section>
+
+  <section id="page-chip" class="page">
+    <div class="card">
+      <h2>Eye chip</h2>
+      <p class="muted">เลือกรูป แล้วลากเพื่อเลื่อน ใช้สองนิ้วถ่างเพื่อย่อขยาย</p>
+      <label class="button wide">เลือกรูปจากเครื่อง<input id="chip-file" type="file" accept="image/*" hidden></label>
+      <canvas id="chip-canvas"></canvas>
+      <input id="chip-zoom" type="range" min="10" max="400" value="100">
+      <div class="grid2">
+        <button id="chip-to-a4" class="primary">เพิ่มลง A4</button>
+        <button id="chip-to-six">เพิ่มลง 4×6</button>
+      </div>
+      <button id="chip-save" class="wide">บันทึกเป็นคัสตอม (ขึ้น GitHub)</button>
+    </div>
+  </section>
+
+  <section id="page-cover" class="page">
+    <div class="card">
+      <h2 id="cover-eye">รูปปก • ยังไม่ได้เลือกลายตา</h2>
+      <p class="muted">เลือกลาย: กดค้างที่ลายในหน้า A4 → ส่งไปหน้าปก</p>
+      <div class="grid2">
+        <select id="cover-template"></select>
+        <button id="cover-random">สุ่มปก</button>
+      </div>
+      <canvas id="cover-canvas" width="1000" height="1000"></canvas>
+      <button id="cover-save" class="primary wide">บันทึกรูปปก</button>
+    </div>
+  </section>
+
+  <section id="page-orders" class="page">
+    <button id="order-new" class="primary wide">＋ ออเดอร์ใหม่</button>
+    <div id="order-list"></div>
+    <div id="order-detail" class="card hidden">
+      <h2 id="order-title"></h2>
+      <p id="order-items" class="muted"></p>
+      <button id="order-save-selection" class="wide">ใส่รายการที่เลือกอยู่ลงออเดอร์นี้</button>
+      <button id="order-load" class="wide">โหลดรายการกลับไปแก้</button>
+      <button id="order-print" class="primary wide">ทำไฟล์พร้อมพิมพ์</button>
+      <button id="order-delete" class="danger wide">ลบออเดอร์</button>
+    </div>
+  </section>
+
+  <section id="page-settings" class="page">
+    <div class="card">
+      <h2>ตั้งค่า</h2>
+      <p id="settings-version" class="muted"></p>
+      <label>GitHub token (ใช้ตอนบันทึกคัสตอมขึ้น GitHub)
+        <input id="token" type="password" autocomplete="off" placeholder="ghp_… หรือ github_pat_…">
+      </label>
+      <button id="token-save" class="wide">บันทึก token</button>
+      <button id="library-reload" class="wide">โหลดลายตาใหม่จาก GitHub</button>
+      <p class="muted">ฟีเจอร์ AI (เจนตา/เจนปก) ใช้ได้เฉพาะบนคอม • ออเดอร์เก็บในเครื่องนี้เท่านั้น</p>
+    </div>
+  </section>
+</main>
+
+<div id="tray" class="tray">
+  <span id="tray-text"></span>
+  <button id="tray-undo">ลบล่าสุด</button>
+  <button id="tray-clear">ล้าง</button>
+  <button id="tray-make" class="primary">ทำไฟล์</button>
+</div>
+
+<nav class="tabs">
+  <button data-page="a4" class="active">A4</button>
+  <button data-page="six">4×6</button>
+  <button data-page="chip">Eye chip</button>
+  <button data-page="cover">ปก</button>
+  <button data-page="orders">ลูกค้า</button>
+  <button data-page="settings">ตั้งค่า</button>
+</nav>
+
+<div id="sheet" class="action-sheet hidden"><div id="sheet-body"></div></div>
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

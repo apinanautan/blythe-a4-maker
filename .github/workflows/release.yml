@@ -18,6 +18,9 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      created: ${{ steps.version.outputs.exists == 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -64,5 +67,19 @@ jobs:
             --title "Blythe Eye Maker ${{ steps.version.outputs.tag }}" `
             --generate-notes `
             --latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  ipa:
+    # The iPhone app is attached to the same release as the EXE.
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build IPA
+        run: bash ios/build_ipa.sh
+      - name: Attach IPA to the release
+        run: gh release upload "${{ needs.release.outputs.tag }}" ios/BlytheEyeMaker.ipa --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
