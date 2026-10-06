@@ -1,0 +1,6 @@
+web/
+build/
+out/
+*.ipa
+BlytheEyeMaker.xcodeproj/
+Info.plist

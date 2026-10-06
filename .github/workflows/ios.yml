@@ -1,0 +1,18 @@
+name: iOS build
+
+# Checks that the iPhone app still builds; the IPA is attached as an artifact.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build IPA
+        run: bash ios/build_ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BlytheEyeMaker-ipa
+          path: ios/BlytheEyeMaker.ipa
