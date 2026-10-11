@@ -1,0 +1,960 @@
+{
+ "generated": "2026-10-11T01:55:56+00:00",
+ "app_version": "1.7.0",
+ "layout": {
+  "dpi": 300,
+  "a4": {
+   "width": 2480,
+   "height": 3508,
+   "chip": 171,
+   "columns": 12,
+   "h_gap": 28,
+   "v_gap": 33,
+   "top": 89,
+   "bottom": 80,
+   "cut_gap": 25,
+   "cut_width": 2
+  },
+  "six": {
+   "width": 1800,
+   "height": 1200,
+   "chip": 161,
+   "x_centers": [
+    188,
+    391,
+    599,
+    797,
+    999,
+    1203,
+    1393,
+    1591
+   ],
+   "y_centers": [
+    237,
+    473,
+    737,
+    971
+   ]
+  },
+  "cover": {
+   "size": 1000
+  }
+ },
+ "sets": [
+  {
+   "key": "set1",
+   "title": "แบบที่หนึ่ง",
+   "items": [
+    {
+     "id": "set1:1",
+     "label": "1",
+     "pieces": 2,
+     "file": "chips/set1/1.png"
+    },
+    {
+     "id": "set1:2",
+     "label": "2",
+     "pieces": 2,
+     "file": "chips/set1/2.png"
+    },
+    {
+     "id": "set1:3",
+     "label": "3",
+     "pieces": 2,
+     "file": "chips/set1/3.png"
+    },
+    {
+     "id": "set1:4",
+     "label": "4",
+     "pieces": 2,
+     "file": "chips/set1/4.png"
+    },
+    {
+     "id": "set1:5",
+     "label": "5",
+     "pieces": 2,
+     "file": "chips/set1/5.png"
+    },
+    {
+     "id": "set1:6",
+     "label": "6",
+     "pieces": 2,
+     "file": "chips/set1/6.png"
+    },
+    {
+     "id": "set1:7",
+     "label": "7",
+     "pieces": 2,
+     "file": "chips/set1/7.png"
+    },
+    {
+     "id": "set1:8",
+     "label": "8",
+     "pieces": 2,
+     "file": "chips/set1/8.png"
+    },
+    {
+     "id": "set1:9",
+     "label": "9",
+     "pieces": 2,
+     "file": "chips/set1/9.png"
+    },
+    {
+     "id": "set1:10",
+     "label": "10",
+     "pieces": 2,
+     "file": "chips/set1/10.png"
+    },
+    {
+     "id": "set1:11",
+     "label": "11",
+     "pieces": 2,
+     "file": "chips/set1/11.png"
+    },
+    {
+     "id": "set1:12",
+     "label": "12",
+     "pieces": 2,
+     "file": "chips/set1/12.png"
+    },
+    {
+     "id": "set1:13",
+     "label": "13",
+     "pieces": 2,
+     "file": "chips/set1/13.png"
+    },
+    {
+     "id": "set1:14",
+     "label": "14",
+     "pieces": 2,
+     "file": "chips/set1/14.png"
+    },
+    {
+     "id": "set1:15",
+     "label": "15",
+     "pieces": 2,
+     "file": "chips/set1/15.png"
+    },
+    {
+     "id": "set1:16",
+     "label": "16",
+     "pieces": 2,
+     "file": "chips/set1/16.png"
+    },
+    {
+     "id": "set1:17",
+     "label": "17",
+     "pieces": 2,
+     "file": "chips/set1/17.png"
+    },
+    {
+     "id": "set1:18",
+     "label": "18",
+     "pieces": 2,
+     "file": "chips/set1/18.png"
+    },
+    {
+     "id": "set1:19",
+     "label": "19",
+     "pieces": 2,
+     "file": "chips/set1/19.png"
+    },
+    {
+     "id": "set1:20",
+     "label": "20",
+     "pieces": 2,
+     "file": "chips/set1/20.png"
+    },
+    {
+     "id": "set1:21",
+     "label": "21",
+     "pieces": 2,
+     "file": "chips/set1/21.png"
+    },
+    {
+     "id": "set1:22",
+     "label": "22",
+     "pieces": 2,
+     "file": "chips/set1/22.png"
+    },
+    {
+     "id": "set1:23",
+     "label": "23",
+     "pieces": 2,
+     "file": "chips/set1/23.png"
+    },
+    {
+     "id": "set1:24",
+     "label": "24",
+     "pieces": 2,
+     "file": "chips/set1/24.png"
+    },
+    {
+     "id": "set1:25",
+     "label": "25",
+     "pieces": 2,
+     "file": "chips/set1/25.png"
+    },
+    {
+     "id": "set1:26",
+     "label": "26",
+     "pieces": 2,
+     "file": "chips/set1/26.png"
+    },
+    {
+     "id": "set1:27",
+     "label": "27",
+     "pieces": 2,
+     "file": "chips/set1/27.png"
+    },
+    {
+     "id": "set1:28",
+     "label": "28",
+     "pieces": 2,
+     "file": "chips/set1/28.png"
+    },
+    {
+     "id": "set1:29",
+     "label": "29",
+     "pieces": 2,
+     "file": "chips/set1/29.png"
+    },
+    {
+     "id": "set1:30",
+     "label": "30",
+     "pieces": 2,
+     "file": "chips/set1/30.png"
+    },
+    {
+     "id": "set1:31",
+     "label": "31",
+     "pieces": 2,
+     "file": "chips/set1/31.png"
+    },
+    {
+     "id": "set1:32",
+     "label": "32",
+     "pieces": 2,
+     "file": "chips/set1/32.png"
+    },
+    {
+     "id": "set1:33",
+     "label": "33",
+     "pieces": 2,
+     "file": "chips/set1/33.png"
+    },
+    {
+     "id": "set1:34",
+     "label": "34",
+     "pieces": 2,
+     "file": "chips/set1/34.png"
+    },
+    {
+     "id": "set1:35",
+     "label": "35",
+     "pieces": 2,
+     "file": "chips/set1/35.png"
+    },
+    {
+     "id": "set1:36",
+     "label": "36",
+     "pieces": 2,
+     "file": "chips/set1/36.png"
+    },
+    {
+     "id": "set1:37",
+     "label": "37",
+     "pieces": 2,
+     "file": "chips/set1/37.png"
+    },
+    {
+     "id": "set1:38",
+     "label": "38",
+     "pieces": 2,
+     "file": "chips/set1/38.png"
+    },
+    {
+     "id": "set1:39",
+     "label": "39",
+     "pieces": 2,
+     "file": "chips/set1/39.png"
+    },
+    {
+     "id": "set1:40",
+     "label": "40",
+     "pieces": 2,
+     "file": "chips/set1/40.png"
+    },
+    {
+     "id": "set1:41",
+     "label": "41",
+     "pieces": 2,
+     "file": "chips/set1/41.png"
+    },
+    {
+     "id": "set1:42",
+     "label": "42",
+     "pieces": 2,
+     "file": "chips/set1/42.png"
+    },
+    {
+     "id": "set1:43",
+     "label": "43",
+     "pieces": 2,
+     "file": "chips/set1/43.png"
+    },
+    {
+     "id": "set1:44",
+     "label": "44",
+     "pieces": 2,
+     "file": "chips/set1/44.png"
+    },
+    {
+     "id": "set1:45",
+     "label": "45",
+     "pieces": 2,
+     "file": "chips/set1/45.png"
+    },
+    {
+     "id": "set1:46",
+     "label": "46",
+     "pieces": 2,
+     "file": "chips/set1/46.png"
+    },
+    {
+     "id": "set1:47",
+     "label": "47",
+     "pieces": 2,
+     "file": "chips/set1/47.png"
+    },
+    {
+     "id": "set1:48",
+     "label": "48",
+     "pieces": 2,
+     "file": "chips/set1/48.png"
+    },
+    {
+     "id": "set1:49",
+     "label": "49",
+     "pieces": 2,
+     "file": "chips/set1/49.png"
+    },
+    {
+     "id": "set1:50",
+     "label": "50",
+     "pieces": 2,
+     "file": "chips/set1/50.png"
+    },
+    {
+     "id": "set1:51",
+     "label": "51",
+     "pieces": 2,
+     "file": "chips/set1/51.png"
+    },
+    {
+     "id": "set1:52.1",
+     "label": "52.1",
+     "pieces": 1,
+     "file": "chips/set1/52.1.png"
+    },
+    {
+     "id": "set1:52.2",
+     "label": "52.2",
+     "pieces": 1,
+     "file": "chips/set1/52.2.png"
+    },
+    {
+     "id": "set1:53.1",
+     "label": "53.1",
+     "pieces": 1,
+     "file": "chips/set1/53.1.png"
+    },
+    {
+     "id": "set1:53.2",
+     "label": "53.2",
+     "pieces": 1,
+     "file": "chips/set1/53.2.png"
+    },
+    {
+     "id": "set1:54",
+     "label": "54",
+     "pieces": 2,
+     "file": "chips/set1/54.png"
+    },
+    {
+     "id": "set1:55",
+     "label": "55",
+     "pieces": 2,
+     "file": "chips/set1/55.png"
+    },
+    {
+     "id": "set1:57",
+     "label": "57",
+     "pieces": 2,
+     "file": "chips/set1/57.png"
+    },
+    {
+     "id": "set1:58",
+     "label": "58",
+     "pieces": 2,
+     "file": "chips/set1/58.png"
+    },
+    {
+     "id": "set1:59",
+     "label": "59",
+     "pieces": 2,
+     "file": "chips/set1/59.png"
+    },
+    {
+     "id": "set1:60",
+     "label": "60",
+     "pieces": 2,
+     "file": "chips/set1/60.png"
+    },
+    {
+     "id": "set1:62",
+     "label": "62",
+     "pieces": 2,
+     "file": "chips/set1/62.png"
+    },
+    {
+     "id": "set1:63",
+     "label": "63",
+     "pieces": 2,
+     "file": "chips/set1/63.png"
+    },
+    {
+     "id": "set1:64",
+     "label": "64",
+     "pieces": 2,
+     "file": "chips/set1/64.png"
+    },
+    {
+     "id": "set1:65",
+     "label": "65",
+     "pieces": 2,
+     "file": "chips/set1/65.png"
+    },
+    {
+     "id": "set1:66",
+     "label": "66",
+     "pieces": 2,
+     "file": "chips/set1/66.png"
+    },
+    {
+     "id": "set1:67",
+     "label": "67",
+     "pieces": 2,
+     "file": "chips/set1/67.png"
+    }
+   ]
+  },
+  {
+   "key": "set2",
+   "title": "แบบที่สอง",
+   "items": [
+    {
+     "id": "set2:26",
+     "label": "26",
+     "pieces": 2,
+     "file": "chips/set2/26.png"
+    },
+    {
+     "id": "set2:27",
+     "label": "27",
+     "pieces": 2,
+     "file": "chips/set2/27.png"
+    },
+    {
+     "id": "set2:28",
+     "label": "28",
+     "pieces": 2,
+     "file": "chips/set2/28.png"
+    },
+    {
+     "id": "set2:29",
+     "label": "29",
+     "pieces": 2,
+     "file": "chips/set2/29.png"
+    },
+    {
+     "id": "set2:30",
+     "label": "30",
+     "pieces": 2,
+     "file": "chips/set2/30.png"
+    },
+    {
+     "id": "set2:31",
+     "label": "31",
+     "pieces": 2,
+     "file": "chips/set2/31.png"
+    },
+    {
+     "id": "set2:32",
+     "label": "32",
+     "pieces": 2,
+     "file": "chips/set2/32.png"
+    },
+    {
+     "id": "set2:33",
+     "label": "33",
+     "pieces": 2,
+     "file": "chips/set2/33.png"
+    },
+    {
+     "id": "set2:34",
+     "label": "34",
+     "pieces": 2,
+     "file": "chips/set2/34.png"
+    },
+    {
+     "id": "set2:35",
+     "label": "35",
+     "pieces": 2,
+     "file": "chips/set2/35.png"
+    },
+    {
+     "id": "set2:36",
+     "label": "36",
+     "pieces": 2,
+     "file": "chips/set2/36.png"
+    },
+    {
+     "id": "set2:37",
+     "label": "37",
+     "pieces": 2,
+     "file": "chips/set2/37.png"
+    }
+   ]
+  },
+  {
+   "key": "set4",
+   "title": "คัสตอม",
+   "items": []
+  }
+ ],
+ "sheets": [
+  {
+   "name": "เเบบที่ 1 เเก้",
+   "file": "sheets/001.jpg"
+  },
+  {
+   "name": "เเบบที่ 2 เเก้",
+   "file": "sheets/002.jpg"
+  },
+  {
+   "name": "เเบบที่ 3 เเก้",
+   "file": "sheets/003.jpg"
+  },
+  {
+   "name": "เเบบที่ 4 เเก้",
+   "file": "sheets/004.jpg"
+  },
+  {
+   "name": "เเบบที่ 5 เเก้",
+   "file": "sheets/005.jpg"
+  },
+  {
+   "name": "เเบบที่ 6 เเก้",
+   "file": "sheets/006.jpg"
+  },
+  {
+   "name": "เเบบที่ 7 ชัด",
+   "file": "sheets/007.jpg"
+  },
+  {
+   "name": "เเบบที่ 7 เเก้",
+   "file": "sheets/008.jpg"
+  },
+  {
+   "name": "เเบบที่ 8 เเก้",
+   "file": "sheets/009.jpg"
+  },
+  {
+   "name": "เเบบที่ 9 เเก้",
+   "file": "sheets/010.jpg"
+  },
+  {
+   "name": "เเบบที่ 10",
+   "file": "sheets/011.jpg"
+  },
+  {
+   "name": "เเบบที่ 10 แก้",
+   "file": "sheets/012.jpg"
+  },
+  {
+   "name": "เเบบที่ 11 แก้",
+   "file": "sheets/013.jpg"
+  },
+  {
+   "name": "เเบบที่ 12 เเก้",
+   "file": "sheets/014.jpg"
+  },
+  {
+   "name": "เเบบที่ 13 เเก้",
+   "file": "sheets/015.jpg"
+  },
+  {
+   "name": "เเบบที่ 14 เเก้",
+   "file": "sheets/016.jpg"
+  },
+  {
+   "name": "เเบบที่ 15",
+   "file": "sheets/017.jpg"
+  },
+  {
+   "name": "เเบบที่ 16",
+   "file": "sheets/018.jpg"
+  },
+  {
+   "name": "เเบบที่ 17",
+   "file": "sheets/019.jpg"
+  },
+  {
+   "name": "เเบบที่ 18",
+   "file": "sheets/020.jpg"
+  },
+  {
+   "name": "เเบบที่ 19",
+   "file": "sheets/021.jpg"
+  },
+  {
+   "name": "เเบบที่ 20",
+   "file": "sheets/022.jpg"
+  },
+  {
+   "name": "เเบบที่ 21",
+   "file": "sheets/023.jpg"
+  },
+  {
+   "name": "เเบบที่ 22",
+   "file": "sheets/024.jpg"
+  },
+  {
+   "name": "เเบบที่ 23",
+   "file": "sheets/025.jpg"
+  },
+  {
+   "name": "เเบบที่ 24",
+   "file": "sheets/026.jpg"
+  },
+  {
+   "name": "AI_Preset_Moonlit_Garden_20260919_144620",
+   "file": "sheets/027.jpg"
+  },
+  {
+   "name": "ยิ้ม",
+   "file": "sheets/028.jpg"
+  }
+ ],
+ "covers": [
+  {
+   "id": "01",
+   "label": "01 • Porcelain Blonde Bob",
+   "file": "covers/01.jpg",
+   "left": [
+    287,
+    502
+   ],
+   "right": [
+    748,
+    503
+   ],
+   "eye": 190
+  },
+  {
+   "id": "02",
+   "label": "02 • Warm Tan Chestnut Bob",
+   "file": "covers/02.jpg",
+   "left": [
+    288,
+    501
+   ],
+   "right": [
+    743,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "03",
+   "label": "03 • Golden Tan Jet Black Long",
+   "file": "covers/03.jpg",
+   "left": [
+    294,
+    503
+   ],
+   "right": [
+    747,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "04",
+   "label": "04 • Neutral Beige Twin Ponytails",
+   "file": "covers/04.jpg",
+   "left": [
+    285,
+    503
+   ],
+   "right": [
+    745,
+    503
+   ],
+   "eye": 190
+  },
+  {
+   "id": "05",
+   "label": "05 • Deep Brown Natural Curls",
+   "file": "covers/05.jpg",
+   "left": [
+    291,
+    502
+   ],
+   "right": [
+    748,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "06",
+   "label": "06 • Rich Dark Burgundy Braids",
+   "file": "covers/06.jpg",
+   "left": [
+    293,
+    504
+   ],
+   "right": [
+    742,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "07",
+   "label": "07 • Peach Fair Copper Waves",
+   "file": "covers/07.jpg",
+   "left": [
+    289,
+    502
+   ],
+   "right": [
+    753,
+    501
+   ],
+   "eye": 190
+  },
+  {
+   "id": "08",
+   "label": "08 • Olive Ash Brown Layered Bob",
+   "file": "covers/08.jpg",
+   "left": [
+    288,
+    502
+   ],
+   "right": [
+    743,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "09",
+   "label": "09 • Light Neutral Pastel Pink Waves",
+   "file": "covers/09.jpg",
+   "left": [
+    284,
+    502
+   ],
+   "right": [
+    745,
+    503
+   ],
+   "eye": 190
+  },
+  {
+   "id": "10",
+   "label": "10 • Medium Deep Silver Pixie",
+   "file": "covers/10.jpg",
+   "left": [
+    285,
+    498
+   ],
+   "right": [
+    741,
+    498
+   ],
+   "eye": 190
+  },
+  {
+   "id": "11",
+   "label": "11 • Ice Gold Glam",
+   "file": "covers/11.jpg",
+   "left": [
+    291,
+    503
+   ],
+   "right": [
+    752,
+    503
+   ],
+   "eye": 190
+  },
+  {
+   "id": "12",
+   "label": "12 • Sun Bronze Honey",
+   "file": "covers/12.jpg",
+   "left": [
+    296,
+    501
+   ],
+   "right": [
+    747,
+    501
+   ],
+   "eye": 190
+  },
+  {
+   "id": "13",
+   "label": "13 • Olive Emerald Noir",
+   "file": "covers/13.jpg",
+   "left": [
+    297,
+    503
+   ],
+   "right": [
+    746,
+    503
+   ],
+   "eye": 190
+  },
+  {
+   "id": "14",
+   "label": "14 • Caramel Copper Fire",
+   "file": "covers/14.jpg",
+   "left": [
+    292,
+    505
+   ],
+   "right": [
+    747,
+    504
+   ],
+   "eye": 190
+  },
+  {
+   "id": "15",
+   "label": "15 • Deep Brown Silver Chic",
+   "file": "covers/15.jpg",
+   "left": [
+    292,
+    507
+   ],
+   "right": [
+    749,
+    507
+   ],
+   "eye": 190
+  },
+  {
+   "id": "16",
+   "label": "16 • Ebony Cobalt Royal",
+   "file": "covers/16.jpg",
+   "left": [
+    296,
+    512
+   ],
+   "right": [
+    744,
+    511
+   ],
+   "eye": 190
+  },
+  {
+   "id": "17",
+   "label": "17 • Cherry Graphic Pop",
+   "file": "covers/17.jpg",
+   "left": [
+    295,
+    504
+   ],
+   "right": [
+    747,
+    504
+   ],
+   "eye": 190
+  },
+  {
+   "id": "18",
+   "label": "18 • Freckled Strawberry Doll",
+   "file": "covers/18.jpg",
+   "left": [
+    288,
+    503
+   ],
+   "right": [
+    745,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "19",
+   "label": "19 • Violet Luxe",
+   "file": "covers/19.jpg",
+   "left": [
+    292,
+    502
+   ],
+   "right": [
+    749,
+    502
+   ],
+   "eye": 190
+  },
+  {
+   "id": "20",
+   "label": "20 • Teal Noir Contrast",
+   "file": "covers/20.jpg",
+   "left": [
+    296,
+    505
+   ],
+   "right": [
+    748,
+    506
+   ],
+   "eye": 190
+  },
+  {
+   "id": "ai01",
+   "label": "AI 01 • ปกใหม่",
+   "file": "covers/ai01.jpg",
+   "left": [
+    271,
+    496
+   ],
+   "right": [
+    759,
+    498
+   ],
+   "eye": 171
+  },
+  {
+   "id": "ai02",
+   "label": "AI 02 • ปกใหม่",
+   "file": "covers/ai02.jpg",
+   "left": [
+    283,
+    503
+   ],
+   "right": [
+    759,
+    503
+   ],
+   "eye": 165
+  }
+ ]
+}
