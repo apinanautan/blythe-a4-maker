@@ -9,7 +9,7 @@ import zipfile
 from collections import OrderedDict
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -43,6 +43,23 @@ class CustomA4Tests(unittest.TestCase):
             left, right = _app.make_custom_a4_pair(source, 171, zoom=1.15)
             self.assertLessEqual(abs(width(left)[0] - width(right)[0]), 1, (right_diameter, right_shift))
             self.assertLessEqual(abs(width(left)[1] - width(right)[1]), 1, (right_diameter, right_shift))
+
+        # The same pairs as an opaque picture on a plain white background (a photo or an AI sheet),
+        # with the eye filling the circle, measured on white like a printed A4.
+        def content(chip):
+            flat = Image.new("RGBA", chip.size, "white")
+            flat.alpha_composite(chip)
+            difference = ImageChops.difference(flat.convert("RGB"), Image.new("RGB", chip.size, "white"))
+            box = difference.convert("L").point(lambda value: 255 if value > 40 else 0).getbbox()
+            return box[2] - box[0], box[3] - box[1]
+
+        for right_diameter, right_shift in ((400, 0), (400, 24), (384, 0), (384, 10), (376, 8)):
+            transparent = two_up(right_diameter, right_shift)
+            opaque = Image.new("RGB", transparent.size, "white")
+            opaque.paste(transparent, (0, 0), transparent)
+            left, right = _app.make_custom_a4_pair(opaque, 171, zoom=1.15)  # 460 px piece, 400 px eye: fills the circle
+            self.assertLessEqual(abs(content(left)[0] - content(right)[0]), 1, ("opaque", right_diameter, right_shift))
+            self.assertLessEqual(abs(content(left)[1] - content(right)[1]), 1, ("opaque", right_diameter, right_shift))
 
         single = Image.new("RGBA", (400, 400), (0, 0, 0, 0))
         ImageDraw.Draw(single).ellipse((20, 20, 380, 380), fill=(30, 120, 60, 255))

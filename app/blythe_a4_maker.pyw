@@ -105,7 +105,7 @@ COVER_FILE_RE = re.compile(r"cover_(\d+)__L(\d+)x(\d+)_R(\d+)x(\d+)_S(\d+)")
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -1360,12 +1360,28 @@ def trim_custom_a4_transparent_margin(image: Image.Image, threshold: int = 12) -
 
 
 def _visible_box(piece: Image.Image) -> tuple[int, int, int, int] | None:
-    """Bounding box of the visible art, or None when the piece has no usable transparency."""
-    box = piece.getchannel("A").point(lambda alpha: 255 if alpha > 12 else 0).getbbox()
+    """Bounding box of the eye in a piece, or None when it cannot be told apart from the background.
+
+    Works for real transparency and for an opaque picture with a plain background colour.
+    """
+    rgba = piece.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    if alpha.getextrema()[0] < 250:
+        box = alpha.point(lambda value: 255 if value > 12 else 0).getbbox()
+    else:
+        rgb = rgba.convert("RGB")
+        width, height = rgb.size
+        corners = [rgb.getpixel(point) for point in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1))]
+        spread = max(max(pixel[channel] for pixel in corners) - min(pixel[channel] for pixel in corners) for channel in range(3))
+        if spread > 32:
+            return None  # the corners are not one plain colour, so there is no background to separate
+        background = tuple(sorted(pixel[channel] for pixel in corners)[len(corners) // 2] for channel in range(3))
+        difference = ImageChops.difference(rgb, Image.new("RGB", rgb.size, background)).convert("L")
+        box = difference.point(lambda value: 255 if value > 24 else 0).getbbox()
     if box is None:
         return None
     if (box[2] - box[0]) >= piece.width * 0.98 and (box[3] - box[1]) >= piece.height * 0.98:
-        return None  # opaque art fills the whole piece, so there is no separate eye to centre
+        return None  # the art fills the whole piece, so there is no separate eye to centre
     return box
 
 
@@ -5047,6 +5063,11 @@ class BlytheA4App(TkinterDnD.Tk):
             label="ซูม • หรือลากมุม/ขอบของรูป • หมุนล้อเมาส์",
         )
         self.custom_a4_zoom_scale.pack(fill="x", pady=(4, 0))
+        tk.Label(
+            adjust, text="ผลลัพธ์ที่จะได้ (ซ้าย | ขวา)", font=("Segoe UI", 8), fg=UI_MUTED, bg=UI_SURFACE
+        ).pack(anchor="w", pady=(6, 2))
+        self.custom_a4_result_label = tk.Label(adjust, bg=UI_SURFACE)
+        self.custom_a4_result_label.pack(anchor="w")
 
         send = step("③ ส่งไปใช้")
         self.custom_a4_add_a4_button = tk.Button(
@@ -5126,7 +5147,38 @@ class BlytheA4App(TkinterDnD.Tk):
             ("v", clamp(mid_x), clamp(y0)), ("v", clamp(mid_x), clamp(y1)),
         ]
 
+    def _update_custom_a4_result_preview(self) -> None:
+        """Show both finished eyes, so a right eye that comes out different is visible before sending."""
+        label = getattr(self, "custom_a4_result_label", None)
+        if label is None or not label.winfo_exists():
+            return
+        source = self.custom_a4_crop_preview_image or self.custom_a4_preview_image or self.custom_a4_image
+        if source is None:
+            self.custom_a4_result_photo = None
+            label.configure(image="")
+            return
+        try:
+            size = 96
+            if self.custom_a4_crop_mode:
+                pair = make_custom_a4_pair(
+                    source, size, zoom=self.custom_a4_zoom.get() / 100,
+                    pan_x=self.custom_a4_pan_x, pan_y=self.custom_a4_pan_y,
+                )
+            else:
+                pair = make_custom_a4_pair_as_is(source, size)
+            sheet = Image.new("RGBA", (size * 2 + 12, size), "white")
+            sheet.alpha_composite(pair[0], (0, 0))
+            sheet.alpha_composite(pair[1], (size + 12, 0))
+            self.custom_a4_result_photo = ImageTk.PhotoImage(sheet)
+            label.configure(image=self.custom_a4_result_photo)
+        except Exception:
+            label.configure(image="")
+
     def _render_custom_a4_crop(self) -> None:
+        self._render_custom_a4_canvas()
+        self._update_custom_a4_result_preview()
+
+    def _render_custom_a4_canvas(self) -> None:
         canvas = self.custom_a4_crop_canvas
         if canvas is None or not canvas.winfo_exists():
             return
