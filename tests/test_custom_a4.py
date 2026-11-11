@@ -21,6 +21,34 @@ _loader.exec_module(_app)
 
 
 class CustomA4Tests(unittest.TestCase):
+    def test_two_up_right_eye_matches_the_left_eye(self):
+        # A right eye that is slightly smaller or off-centre in its half used to come out
+        # narrower and lens-shaped, because the left eye's framing was reused as it was.
+        def two_up(right_diameter, right_shift):
+            half = 455  # room for a 400 px eye plus a margin in each half
+            image = Image.new("RGBA", (half * 2, 460), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((half // 2 - 200, 30, half // 2 + 200, 430), fill=(120, 40, 160, 255))
+            cx = half + half // 2 + right_shift
+            radius = right_diameter // 2
+            draw.ellipse((cx - radius, 230 - radius, cx + radius, 230 + radius), fill=(120, 40, 160, 255))
+            return image
+
+        def width(chip):
+            box = chip.getchannel("A").point(lambda value: 255 if value > 128 else 0).getbbox()
+            return box[2] - box[0], box[3] - box[1]
+
+        for right_diameter, right_shift in ((400, 0), (400, 24), (384, 0), (384, 10)):
+            source = _app.trim_custom_a4_transparent_margin(two_up(right_diameter, right_shift))
+            left, right = _app.make_custom_a4_pair(source, 171, zoom=1.15)
+            self.assertLessEqual(abs(width(left)[0] - width(right)[0]), 1, (right_diameter, right_shift))
+            self.assertLessEqual(abs(width(left)[1] - width(right)[1]), 1, (right_diameter, right_shift))
+
+        single = Image.new("RGBA", (400, 400), (0, 0, 0, 0))
+        ImageDraw.Draw(single).ellipse((20, 20, 380, 380), fill=(30, 120, 60, 255))
+        left, right = _app.make_custom_a4_pair(single, 171, zoom=1.1, pan_x=0.2, pan_y=-0.1)
+        self.assertEqual(left.tobytes(), right.tobytes())
+
     def test_custom_moves_into_set_one_as_next_number(self):
         with tempfile.TemporaryDirectory() as temp:
             custom = Path(temp) / "custom"

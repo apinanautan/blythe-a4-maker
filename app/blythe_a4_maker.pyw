@@ -105,7 +105,7 @@ COVER_FILE_RE = re.compile(r"cover_(\d+)__L(\d+)x(\d+)_R(\d+)x(\d+)_S(\d+)")
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 GITHUB_DATA_URL = "https://github.com/apinanautan/blythe-a4-maker/tree/data"
 APP_UPDATE_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/commits/main"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 APP_RELEASES_API_URL = "https://api.github.com/repos/apinanautan/blythe-a4-maker/releases"
 APP_ASSET_ARCHIVE_NAME = "BlytheEyeMakerAssets.zip"
 APP_EXECUTABLE_NAME = "BlytheEyeMaker.exe"
@@ -1359,6 +1359,37 @@ def trim_custom_a4_transparent_margin(image: Image.Image, threshold: int = 12) -
     return rgba.crop(bounds) if bounds else rgba
 
 
+def _visible_box(piece: Image.Image) -> tuple[int, int, int, int] | None:
+    """Bounding box of the visible art, or None when the piece has no usable transparency."""
+    box = piece.getchannel("A").point(lambda alpha: 255 if alpha > 12 else 0).getbbox()
+    if box is None:
+        return None
+    if (box[2] - box[0]) >= piece.width * 0.98 and (box[3] - box[1]) >= piece.height * 0.98:
+        return None  # opaque art fills the whole piece, so there is no separate eye to centre
+    return box
+
+
+def _place_piece(piece: Image.Image, scale: float, dest_x: int, dest_y: int, size_px: int) -> Image.Image:
+    """Scale a piece, put it at (dest_x, dest_y) on a size_px square and cut it to a circle."""
+    resized = piece.resize(
+        (max(1, round(piece.width * scale)), max(1, round(piece.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    canvas = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
+    source_box = (
+        max(0, -dest_x),
+        max(0, -dest_y),
+        min(resized.width, size_px - dest_x),
+        min(resized.height, size_px - dest_y),
+    )
+    if source_box[2] > source_box[0] and source_box[3] > source_box[1]:
+        canvas.alpha_composite(resized.crop(source_box), (max(0, dest_x), max(0, dest_y)))
+    mask = Image.new("L", (size_px * 4, size_px * 4), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size_px * 4 - 1, size_px * 4 - 1), fill=255)
+    canvas.putalpha(ImageChops.multiply(canvas.getchannel("A"), mask.resize((size_px, size_px), Image.Resampling.LANCZOS)))
+    return canvas
+
+
 def make_custom_a4_pair(
     image: Image.Image,
     size_px: int,
@@ -1367,49 +1398,49 @@ def make_custom_a4_pair(
     pan_x: float = 0.0,
     pan_y: float = 0.0,
 ) -> tuple[Image.Image, Image.Image]:
-    """Fit custom art to equal circular print slots, optionally removing edge-connected white."""
+    """Fit custom art to equal circular print slots, optionally removing edge-connected white.
+
+    The framing you see in the editor is the left eye's. A right-hand eye that is a little
+    smaller, or sits a little off-centre inside its half, is lined up to the left eye's
+    size and position, so both come out the same instead of the right one being clipped.
+    """
     source = image.convert("RGBA")
-    if source.width >= source.height * 1.7:
+    two_up = source.width >= source.height * 1.7
+    if two_up:
         midpoint = source.width // 2
-        pieces = (source.crop((0, 0, midpoint, source.height)), source.crop((midpoint, 0, source.width, source.height)))
+        pieces = [source.crop((0, 0, midpoint, source.height)), source.crop((midpoint, 0, source.width, source.height))]
     else:
-        pieces = (source, source.copy())
+        pieces = [source, source.copy()]
+    if remove_background:
+        pieces = [remove_outer_background(piece) for piece in pieces]
 
     zoom = max(0.25, min(float(zoom), 2.5))
+    pan_x = max(-1.0, min(float(pan_x), 1.0))
+    pan_y = max(-1.0, min(float(pan_y), 1.0))
     outputs: list[Image.Image] = []
-    for piece in pieces:
-        if remove_background:
-            piece = remove_outer_background(piece)
+    reference: tuple[float, float, float, float] | None = None  # left eye: scale, centre x/y, side on the slot
+    for index, piece in enumerate(pieces):
         scale = size_px * zoom / max(piece.size)
-        resized = piece.resize(
-            (max(1, round(piece.width * scale)), max(1, round(piece.height * scale))),
-            Image.Resampling.LANCZOS,
-        )
-        canvas = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
-        pan_x = max(-1.0, min(float(pan_x), 1.0))
-        pan_y = max(-1.0, min(float(pan_y), 1.0))
-        dest_x = (
-            -round((resized.width - size_px) * (1 - pan_x) / 2)
-            if resized.width > size_px
-            else round((size_px - resized.width) * (1 + pan_x) / 2)
-        )
-        dest_y = (
-            -round((resized.height - size_px) * (1 - pan_y) / 2)
-            if resized.height > size_px
-            else round((size_px - resized.height) * (1 + pan_y) / 2)
-        )
-        source_box = (
-            max(0, -dest_x),
-            max(0, -dest_y),
-            min(resized.width, size_px - dest_x),
-            min(resized.height, size_px - dest_y),
-        )
-        if source_box[2] > source_box[0] and source_box[3] > source_box[1]:
-            canvas.alpha_composite(resized.crop(source_box), (max(0, dest_x), max(0, dest_y)))
-        mask = Image.new("L", (size_px * 4, size_px * 4), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, size_px * 4 - 1, size_px * 4 - 1), fill=255)
-        canvas.putalpha(ImageChops.multiply(canvas.getchannel("A"), mask.resize((size_px, size_px), Image.Resampling.LANCZOS)))
-        outputs.append(canvas)
+        width, height = max(1, round(piece.width * scale)), max(1, round(piece.height * scale))
+        dest_x = -round((width - size_px) * (1 - pan_x) / 2) if width > size_px else round((size_px - width) * (1 + pan_x) / 2)
+        dest_y = -round((height - size_px) * (1 - pan_y) / 2) if height > size_px else round((size_px - height) * (1 + pan_y) / 2)
+        box = _visible_box(piece) if two_up else None
+        if index == 0:
+            if box is not None:
+                reference = (
+                    scale,
+                    dest_x + (box[0] + box[2]) / 2 * scale,
+                    dest_y + (box[1] + box[3]) / 2 * scale,
+                    max(box[2] - box[0], box[3] - box[1]) * scale,
+                )
+        elif reference is not None and box is not None:
+            side = max(box[2] - box[0], box[3] - box[1])
+            ratio = reference[3] / (side * scale) if side else 1.0
+            if 0.7 <= ratio <= 1.4:  # a wildly different size means the box is not really an eye
+                scale *= ratio
+                dest_x = round(reference[1] - (box[0] + box[2]) / 2 * scale)
+                dest_y = round(reference[2] - (box[1] + box[3]) / 2 * scale)
+        outputs.append(_place_piece(piece, scale, dest_x, dest_y, size_px))
     return outputs[0], outputs[1]
 
 
