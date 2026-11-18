@@ -1,12 +1,13 @@
 from pathlib import Path
 from datetime import datetime
-from functools import lru_cache
+from http.client import HTTPConnection, HTTPException
+from io import BytesIO
+import base64
 import json
+import os
 import random
 import re
-import runpy
-import urllib.error
-import urllib.request
+from uuid import uuid4
 
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 
@@ -159,95 +160,98 @@ def eye_prompt(
     return prompt
 
 
-def find_snapgen_client() -> Path:
-    preferred = Path.home() / "Documents" / "Codex" / "2026-07-26" / "new-chat-2" / "snapgen_image_gen.py"
-    if preferred.is_file():
-        return preferred
-    root = Path.home() / "Documents"
-    if root.is_dir():
-        for path in root.rglob("snapgen_image_gen.py"):
-            return path
-    raise FileNotFoundError("snapgen_image_gen.py was not found")
-
-
-@lru_cache(maxsize=1)
-def _snapgen_namespace() -> dict:
-    return runpy.run_path(str(find_snapgen_client()))
-
-
-def _response_text(result: dict) -> str:
-    choices = result.get("choices") or []
-    if choices:
-        content = (choices[0].get("message") or {}).get("content")
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    value = item.get("text") or item.get("content")
-                    if isinstance(value, str):
-                        parts.append(value)
-            if parts:
-                return "\n".join(parts).strip()
-    return str(result.get("text") or "").strip()
-
-
-def _bridge_chat(
-    namespace: dict,
-    prompt: str,
-    conversation_state: dict[str, str] | None = None,
-) -> tuple[str, dict[str, str]]:
-    payload = {
-        "model": namespace.get("MODEL") or "auto",
-        "messages": [{"role": "user", "content": prompt}],
-        # Keep the Blythe collection conversation temporary.  The returned
-        # cursor is kept only in this running app process, so reopening the
-        # program always starts a fresh ChatGPT history.
-        "history_and_training_disabled": True,
-        # This request is planning/text only.  The bridge has an automatic
-        # image-intent interceptor for /v1/chat/completions; phrases such as
-        # "ห้ามสร้างรูปภาพตอนนี้" still contain image-generation keywords and
-        # can be misclassified.  Disable that interceptor explicitly here.
-        "chatgpt_image_intercept": False,
-    }
-    if conversation_state:
-        conversation_id = conversation_state.get("conversation_id")
-        parent_message_id = conversation_state.get("parent_message_id")
-        if conversation_id and parent_message_id:
-            payload["metadata"] = {
-                "conversation_id": conversation_id,
-                "parent_message_id": parent_message_id,
-            }
-    request = urllib.request.Request(
-        f"{str(namespace.get('BRIDGE_URL') or 'http://127.0.0.1:8000').rstrip('/')}/v1/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {namespace.get('BRIDGE_KEY') or 'local-dev-key'}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+def _chrome_relay_config() -> tuple[int, str]:
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    settings_path = local / "Tidmunz Studio" / "snapgen_data" / "chrome_relay.json"
     try:
-        with urllib.request.urlopen(request, timeout=int(namespace.get("TIMEOUT") or 300)) as response:
-            result = json.loads(response.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"GPT ออกแบบชุดไม่สำเร็จ HTTP {exc.code}: {body}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"GPT ออกแบบชุดไม่สำเร็จ: {exc}") from exc
-    if isinstance(result.get("error"), dict):
-        raise RuntimeError(str(result["error"].get("message") or result["error"]))
-    text = _response_text(result)
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        port, token = settings["port"], settings["token"]
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("invalid port")
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            raise ValueError("invalid token")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            "ไม่พบการตั้งค่าส่วนขยาย Tidmunz ChatGPT กรุณาเปิด Tidmunz Studio รุ่นที่ใช้ส่วนขยาย"
+        ) from exc
+    return port, token
+
+
+def _chrome_request(endpoint: str, payload: dict, conversation_state: dict[str, str] | None) -> dict:
+    port, token = _chrome_relay_config()
+    if conversation_state and conversation_state.get("conversation_id"):
+        payload = {**payload, "conversation_id": conversation_state["conversation_id"]}
+    connection = HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.connect()
+    except OSError as exc:
+        raise RuntimeError(
+            "เชื่อมต่อส่วนขยาย Tidmunz ChatGPT ไม่ได้ กรุณาเปิด Tidmunz Studio และ Chrome ของโปรแกรม"
+        ) from exc
+    try:
+        connection.sock.settimeout(1200)
+        connection.request(
+            "POST", f"/{token}/v1/{endpoint}", json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            {"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        data = response.read()
+    except (OSError, HTTPException) as exc:
+        raise RuntimeError(
+            "การเชื่อมต่อกับส่วนขยายขาดระหว่างรอผล กรุณาตรวจแชตใน Chrome ก่อนส่งงานเดิมอีกครั้ง"
+        ) from exc
+    finally:
+        connection.close()
+    try:
+        result = json.loads(data)
+    except ValueError:
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    error = result.get("error")
+    if response.status >= 300 or error:
+        message = error.get("message") if isinstance(error, dict) else error
+        if response.status in (403, 404) and not message:
+            message = "กรุณาเปิด Tidmunz Studio รุ่นที่ใช้ส่วนขยาย แล้วลองอีกครั้ง"
+        raise RuntimeError(f"ChatGPT ผ่านส่วนขยายไม่สำเร็จ (HTTP {response.status}) • {message or 'ส่วนขยายไม่ส่งผลกลับมา'}")
+    return result
+
+
+def _chrome_chat(prompt: str, conversation_state: dict[str, str] | None) -> tuple[str, dict[str, str]]:
+    result = _chrome_request(
+        "chat/completions", {"messages": [{"role": "user", "content": prompt}]}, conversation_state,
+    )
+    text = str(result.get("text") or "").strip()
+    conversation_id = result.get("conversation_id")
     if not text:
         raise RuntimeError("GPT ไม่ส่งแผนชุดตากลับมา")
-    state = {
-        "conversation_id": str(result.get("conversation_id") or ""),
-        "parent_message_id": str(result.get("parent_message_id") or ""),
-    }
-    if not state["conversation_id"] or not state["parent_message_id"]:
-        raise RuntimeError("Bridge ไม่ส่งรหัส conversation สำหรับชุด 16 คู่")
-    return text, state
+    if not conversation_id:
+        raise RuntimeError("ส่วนขยายไม่ส่งรหัสแชตสำหรับชุด 16 คู่")
+    return text, {"conversation_id": str(conversation_id)}
+
+
+def _chrome_image(
+    prompt: str,
+    conversation_state: dict[str, str] | None = None,
+    reference_image: Path | None = None,
+) -> Image.Image:
+    payload = {"prompt": prompt}
+    endpoint = "images/generations"
+    if reference_image is not None:
+        payload["images"] = [base64.b64encode(Path(reference_image).read_bytes()).decode("ascii")]
+        endpoint = "images/edits"
+    result = _chrome_request(endpoint, payload, conversation_state)
+    images = result.get("data") or []
+    if not images or not images[0].get("b64_json"):
+        raise RuntimeError("ส่วนขยายไม่ส่งภาพจาก ChatGPT กลับมา")
+    with Image.open(BytesIO(base64.b64decode(images[0]["b64_json"]))) as opened:
+        image = opened.convert("RGBA")
+    if conversation_state is not None:
+        conversation_id = result.get("conversation_id")
+        if not conversation_id:
+            raise RuntimeError("ส่วนขยายไม่ส่งรหัสแชตสำหรับสร้างภาพต่อเนื่อง")
+        conversation_state["conversation_id"] = str(conversation_id)
+    return image
 
 
 def _json_object(text: str) -> dict:
@@ -351,12 +355,10 @@ def design_collection_16(
 {{"collection_name":"ชื่อชุดสั้น ๆ","concept":"คอนเซ็ปต์รวม","direction":"แนวทางภาพรวมของทั้งชุด","style":"ชื่อสไตล์","design":"ชื่อลาย","pairs":[{{"index":1,"primary":"ชื่อสี","secondary":"ชื่อสี","variation":"รายละเอียดสั้น ๆ"}}]}}
 ต้องมี pairs ตั้งแต่ index 1 ถึง 16 ครบพอดี"""
 
-    namespace = _snapgen_namespace()
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            text, conversation_state = _bridge_chat(
-                namespace,
+            text, conversation_state = _chrome_chat(
                 prompt if attempt == 0 else prompt + "\nครั้งก่อน JSON ไม่ผ่าน validation กรุณาส่งใหม่ให้ตรง schema ทุกข้อ",
                 conversation_state,
             )
@@ -426,8 +428,7 @@ def _crop_eye_clean(image: Image.Image, padding_ratio: float = 0.06) -> Image.Im
     return canvas
 
 
-def _create_eye_with_namespace(
-    namespace: dict,
+def _create_eye(
     user_prompt: str,
     output_dir: Path,
     style: str = "สมจริง",
@@ -435,104 +436,31 @@ def _create_eye_with_namespace(
     design: str = "เส้นรัศมีธรรมชาติ",
     color_primary: str = "น้ำตาล",
     color_secondary: str = "ทอง",
-    name_hint: str = "blythe_ai_eye",
-    save_sidecar: bool = True,
     conversation_state: dict[str, str] | None = None,
     reference_image: Path | None = None,
+    output_path: Path | None = None,
 ) -> tuple[Path, Image.Image]:
-    generate_image = namespace.get("generate_image")
-    if not callable(generate_image):
-        raise RuntimeError("SnapGen client has no generate_image()")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pngs_before = {path.resolve() for path in output_dir.glob("*.png")}
-    client_globals = getattr(generate_image, "__globals__", namespace)
-    story = client_globals.get("_story_conversation")
-    save_story = client_globals.get("_save_story_conversation")
-    original_story = dict(story) if isinstance(story, dict) else None
-    # A collection gets its own image-generation conversation.  An empty dict
-    # means "start a fresh image chat and capture its cursor"; a populated dict
-    # means "continue that same image chat".  Do not reuse the text-planning
-    # cursor here: ChatGPT Web can return 404 when an image request tries to
-    # continue a temporary text-only conversation.
-    use_story_history = conversation_state is not None and isinstance(story, dict)
-    if use_story_history:
-        conversation_id = conversation_state.get("conversation_id")
-        parent_message_id = conversation_state.get("parent_message_id")
-        if conversation_id and parent_message_id:
-            story["conversation_id"] = conversation_id
-            story["parent_message_id"] = parent_message_id
-        else:
-            # Force the first eye of this collection to create a new image
-            # conversation instead of inheriting SnapGen's persisted story id.
-            story["conversation_id"] = None
-            story["parent_message_id"] = None
-        if callable(save_story):
-            client_globals["_save_story_conversation"] = lambda: None
-    try:
-        edit_options = {}
-        if reference_image is not None:
-            reference_image = Path(reference_image)
-            if not reference_image.is_file():
-                raise FileNotFoundError(f"ไม่พบรูปอ้างอิง: {reference_image}")
-            encode_image = namespace.get("encode_image_b64")
-            if not callable(encode_image):
-                raise RuntimeError("SnapGen client has no encode_image_b64()")
-            edit_options = {
-                "is_edit": True,
-                "ref_images": [encode_image(str(reference_image))],
-            }
-            requested_changes = [user_prompt.strip()] if user_prompt.strip() else []
-            if style != "อัตโนมัติ":
-                requested_changes.append(f"Style: {STYLE_PROMPTS.get(style, style)}")
-            if design != "อัตโนมัติ":
-                requested_changes.append(f"Iris design: {DESIGN_PROMPTS.get(design, design)}")
-            if color_primary != "อัตโนมัติ":
-                requested_changes.append(
-                    f"Primary iris color: {COLOR_PROMPTS.get(color_primary, color_primary)}"
-                )
-            if color_secondary != "อัตโนมัติ":
-                requested_changes.append(
-                    f"Secondary iris color: {COLOR_PROMPTS.get(color_secondary, color_secondary)}"
-                )
-            prompt = (
-                "Edit the attached image as the visual reference. Preserve its eye design, "
-                "composition, circular shape, and all details the user did not ask to change. "
-                "Apply only the explicit requested changes. Keep the same eye unless a change is listed. "
-                "Return one finished square 1:1 eye image with the complete circular eye visible "
-                "and a transparent background. Requested changes: "
-                + ("; ".join(requested_changes) if requested_changes else "none; reproduce the reference faithfully")
-            )
-        else:
-            prompt = eye_prompt(
-                user_prompt,
-                style,
-                background,
-                design,
-                color_primary,
-                color_secondary,
-            )
-        result = generate_image(
-            prompt,
-            output_dir=str(output_dir),
-            name_hint=name_hint,
-            aspect_ratio="1:1",
-            save_sidecar=save_sidecar,
-            use_story_history=use_story_history,
-            **edit_options,
+    if reference_image is not None:
+        requested_changes = [user_prompt.strip()] if user_prompt.strip() else []
+        if style != "อัตโนมัติ":
+            requested_changes.append(f"Style: {STYLE_PROMPTS.get(style, style)}")
+        if design != "อัตโนมัติ":
+            requested_changes.append(f"Iris design: {DESIGN_PROMPTS.get(design, design)}")
+        if color_primary != "อัตโนมัติ":
+            requested_changes.append(f"Primary iris color: {COLOR_PROMPTS.get(color_primary, color_primary)}")
+        if color_secondary != "อัตโนมัติ":
+            requested_changes.append(f"Secondary iris color: {COLOR_PROMPTS.get(color_secondary, color_secondary)}")
+        prompt = (
+            "Edit the attached image as the visual reference. Preserve its eye design, "
+            "composition, circular shape, and all details the user did not ask to change. "
+            "Apply only the explicit requested changes. Keep the same eye unless a change is listed. "
+            "Return one finished square 1:1 eye image with the complete circular eye visible "
+            "and a transparent background. Requested changes: "
+            + ("; ".join(requested_changes) if requested_changes else "none; reproduce the reference faithfully")
         )
-        if use_story_history:
-            conversation_state["conversation_id"] = str(story.get("conversation_id") or "")
-            conversation_state["parent_message_id"] = str(story.get("parent_message_id") or "")
-    finally:
-        if use_story_history and original_story is not None:
-            story.clear()
-            story.update(original_story)
-            if callable(save_story):
-                client_globals["_save_story_conversation"] = save_story
-    path = Path(result)
-    with Image.open(path) as opened:
-        native_rgba = opened.convert("RGBA").copy()
+    else:
+        prompt = eye_prompt(user_prompt, style, background, design, color_primary, color_secondary)
+    native_rgba = _chrome_image(prompt, conversation_state, reference_image)
 
     has_native_transparency = (
         background == "โปร่งใส"
@@ -554,18 +482,9 @@ def _create_eye_with_namespace(
     image = _crop_eye_clean(isolated)
     image = _ensure_square(image, "โปร่งใส")
 
-    path = path.with_suffix(".png")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_path or output_dir / f"blythe_ai_eye_{uuid4().hex}.png"
     image.save(path, format="PNG")
-
-    # Some ChatGPT Web image responses expose more than one fresh image asset
-    # even though n=1. SnapGen/Blythe uses only the returned path, so remove
-    # only the extra PNGs created during this request. Existing user files are
-    # never touched.
-    keep = path.resolve()
-    for extra in output_dir.glob("*.png"):
-        resolved = extra.resolve()
-        if resolved not in pngs_before and resolved != keep:
-            extra.unlink(missing_ok=True)
     return path, image
 
 
@@ -580,8 +499,7 @@ def create_eye(
     reference_image: Path | None = None,
     conversation_state: dict[str, str] | None = None,
 ) -> tuple[Path, Image.Image]:
-    return _create_eye_with_namespace(
-        _snapgen_namespace(),
+    return _create_eye(
         user_prompt,
         output_dir,
         style,
@@ -589,7 +507,6 @@ def create_eye(
         design,
         color_primary,
         color_secondary,
-        save_sidecar=False,
         conversation_state=conversation_state,
         reference_image=reference_image,
     )
@@ -608,7 +525,6 @@ def create_eye_collection_16(
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     preset_dir = output_root / f"Preset_{stamp}"
     preset_dir.mkdir(parents=True, exist_ok=False)
-    namespace = _snapgen_namespace()
     paths: list[Path] = []
     images: list[Image.Image] = []
 
@@ -622,8 +538,8 @@ def create_eye_collection_16(
         variation = str(item.get("variation") or "").strip()
         detail_parts = [
             (
-                f"This is pair {index} of the 16-pair Blythe collection plan already defined earlier "
-                "in this same conversation. Preserve the collection concept, visual language, palette logic, "
+                f"This is pair {index} of one 16-pair Blythe collection. "
+                "Preserve the collection concept, visual language, palette logic, "
                 "and overall theme consistently."
             ),
             f"Collection concept: {plan.get('concept', '')}",
@@ -633,35 +549,24 @@ def create_eye_collection_16(
         ]
         detail_parts = [part for part in detail_parts if part and not part.endswith(": ")]
         detail = ". ".join(detail_parts)
-        last_error: Exception | None = None
-        for _attempt in range(2):
-            try:
-                path, image = _create_eye_with_namespace(
-                    namespace,
-                    detail,
-                    preset_dir,
-                    style=plan["style"],
-                    background="โปร่งใส",
-                    design=plan["design"],
-                    color_primary=item["primary"],
-                    color_secondary=item["secondary"],
-                    name_hint=f"preset_{index:02d}",
-                    save_sidecar=False,
-                    conversation_state=conversation_state,
-                )
-                canonical = preset_dir / f"{index:02d}.png"
-                image.save(canonical, format="PNG")
-                if path.resolve() != canonical.resolve():
-                    path.unlink(missing_ok=True)
-                paths.append(canonical)
-                images.append(image)
-                if on_image:
-                    on_image(index, canonical, image)
-                break
-            except Exception as exc:
-                last_error = exc
-        else:
-            raise RuntimeError(f"สร้างคู่ {index} ไม่สำเร็จ: {last_error}")
+        try:
+            path, image = _create_eye(
+                detail,
+                preset_dir,
+                style=plan["style"],
+                background="โปร่งใส",
+                design=plan["design"],
+                color_primary=item["primary"],
+                color_secondary=item["secondary"],
+                conversation_state=conversation_state,
+                output_path=preset_dir / f"{index:02d}.png",
+            )
+        except Exception as exc:
+            raise RuntimeError(f"สร้างคู่ {index} ไม่สำเร็จ: {exc}") from exc
+        paths.append(path)
+        images.append(image)
+        if on_image:
+            on_image(index, path, image)
 
     manifest = dict(plan)
     manifest["files"] = [path.name for path in paths]
@@ -705,19 +610,8 @@ def cover_prompt(rng=None) -> str:
 
 def create_cover_template(reference_image: Path, output_dir: Path, prompt: str | None = None) -> Path:
     """Generate a new blank-eyed doll cover from an existing cover used as the layout reference."""
-    namespace = _snapgen_namespace()
-    generate_image = namespace.get("generate_image")
-    encode_image = namespace.get("encode_image_b64")
-    if not callable(generate_image) or not callable(encode_image):
-        raise RuntimeError("SnapGen client has no generate_image() / encode_image_b64()")
+    image = _chrome_image(prompt or cover_prompt(), reference_image=reference_image)
     output_dir.mkdir(parents=True, exist_ok=True)
-    result = generate_image(
-        prompt or cover_prompt(),
-        output_dir=str(output_dir),
-        name_hint="blythe_cover",
-        aspect_ratio="1:1",
-        save_sidecar=False,
-        is_edit=True,
-        ref_images=[encode_image(str(reference_image))],
-    )
-    return Path(result)
+    path = output_dir / f"blythe_cover_{uuid4().hex}.png"
+    image.save(path, format="PNG")
+    return path
